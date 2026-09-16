@@ -1,0 +1,135 @@
+# nemlig-mcp
+
+An MCP server that shops groceries at [Nemlig.com](https://www.nemlig.com). It runs
+as a plain Docker container on the homelab and speaks MCP over streamable HTTP, so
+any MCP client on the LAN — Claude Code, Claude Desktop, or the shopping app that
+comes later — can point at one URL and use it.
+
+This is a port of an Azure Functions prototype. Same idea, none of the Azure.
+
+## How it works
+
+Nemlig has no public API and no way to get a token with an HTTP call: logging in
+means running their JavaScript login form. So the server drives a headless
+Chromium once, catches the JWT that the form's token request returns, keeps the
+cookies it set alongside it, and calls it a **session**.
+
+Everything after that is ordinary `fetch` against Nemlig's web API, reusing that
+one token. A session is the unit of "don't log in again" — hold on to its
+`sessionId` for a whole shopping trip and the browser never starts a second time.
+
+Sessions are written to `/data/sessions.json` (mode `0600`), so a container
+restart does not cost a fresh login either. If Nemlig rejects a token mid-session,
+the server logs in again and retries the call once, which the client never sees.
+
+```
+MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig web API (fetch + JWT)
+                                     │
+                                     └─ first call only ─► Playwright ─► login form
+```
+
+## Tools
+
+| Tool | What it does |
+| --- | --- |
+| `new_session` | Logs in and returns a `sessionId`. |
+| `get_basket` | The current basket, including its delivery slot. |
+| `search_products` | Searches the catalogue (Danish terms) for a product id. |
+| `get_favourite_products` | The account's frequently bought products. |
+| `add_to_basket` | Adds a product id to the basket. |
+| `end_session` | Forgets a session and its stored token. |
+
+`sessionId` is optional everywhere except `end_session`: omit it and the server
+reuses the account's most recent session, or starts one. Search and favourites
+both need the basket's delivery slot to return real prices and stock, so the
+server fetches the basket once per session and caches it — `add_to_basket`
+invalidates that cache.
+
+Nothing here checks out an order. The basket is as far as it goes, on purpose.
+
+## Configuration
+
+Credentials come from the container's environment by default, and an MCP client
+may override them per request with `X-Nemlig-Username` / `X-Nemlig-Password`. Only
+the resulting token is ever written to disk, filed under a hash of the username —
+a session started by one account is never handed to another.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEMLIG_USERNAME` / `NEMLIG_PASSWORD` | — | The default account. Omit both to make the server header-only. |
+| `NEMLIG_ALLOW_HEADER_CREDENTIALS` | `true` | Set `false` to pin the server to the env account. |
+| `NEMLIG_HEADLESS` | `true` | See *Headless and bot checks* below. |
+| `NEMLIG_LOGIN_TIMEOUT_MS` | `60000` | How long to wait for the token response. |
+| `NEMLIG_SESSION_TTL_MS` | `604800000` (7 days) | Untouched sessions are pruned hourly. |
+| `NEMLIG_DATA_DIR` | `/data` | Where `sessions.json` lives. |
+| `NEMLIG_WEBAPI_BUILD_ID` | `a2CUwjmB-wDTdpgqB` | Opaque segment in the favourites URL; see *Known fragility*. |
+| `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address. |
+
+`.env.example` has the rest.
+
+## Running it
+
+```bash
+cp .env.example .env   # fill in NEMLIG_USERNAME and NEMLIG_PASSWORD
+docker compose up -d --build
+```
+
+The endpoint is then `http://<host>:8089/mcp`, with `/health` alongside it. To run
+the image CI publishes instead of building locally, use `deploy/docker-compose.yml`.
+
+There is **no authentication on the MCP endpoint** — it is LAN-only by design. Put
+a Cloudflare tunnel with Access in front of it if it ever needs to leave the house.
+
+### Pointing a client at it
+
+```bash
+claude mcp add --transport http nemlig http://<host>:8089/mcp
+```
+
+Or, to use a different account than the container's:
+
+```bash
+claude mcp add --transport http nemlig http://<host>:8089/mcp \
+  --header "X-Nemlig-Username: you@example.com" \
+  --header "X-Nemlig-Password: ..."
+```
+
+### Developing
+
+```bash
+npm install
+npx playwright install chromium   # only needed to exercise a real login
+npm run dev
+npm test
+```
+
+The tests run every tool end to end over streamable HTTP against a fake Nemlig,
+with the browser login stubbed — including token expiry, the retry, and a
+restart. No network and no browser required.
+
+## Known fragility
+
+This talks to a private API by pretending to be the website, so it breaks when
+the website changes. The two places that will go first:
+
+- **The login flow.** `src/nemlig/login.ts` fills `[name='userEmail']` and
+  `[name='userPassword']` and waits for `POST /webapi/Token`. If Nemlig redesigns
+  the login page, that is the file to fix.
+- **The favourites URL**, which contains `a2CUwjmB-wDTdpgqB` — a build id from
+  Nemlig's own frontend. If favourites start returning 404, read a fresh one off
+  the network tab and set `NEMLIG_WEBAPI_BUILD_ID`.
+
+### Headless and bot checks
+
+The original prototype ran real Chrome with a visible window, which is the most
+likely thing to survive a bot check. A container has no display, so this runs
+headless Chromium with a normal user agent. If Nemlig ever refuses that, the
+options are `NEMLIG_HEADLESS=false` with an X server in the container, or running
+the login on a machine that has a display. It has not been a problem so far, but
+it is the assumption most likely to break.
+
+## Upgrading Playwright
+
+`package.json` pins Playwright exactly and the Dockerfile pins the matching
+`mcr.microsoft.com/playwright:v<version>-noble` base image. Bump both in the same
+commit, or the container will try to download a browser it has no room for.

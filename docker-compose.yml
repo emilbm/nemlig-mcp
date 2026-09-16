@@ -1,0 +1,24 @@
+# Builds from this working copy — for developing on the image itself.
+# To run the image built by CI instead, use deploy/docker-compose.yml.
+
+services:
+  nemlig-mcp:
+    build: .
+    image: nemlig-mcp:local
+    container_name: nemlig-mcp
+    restart: unless-stopped
+    ports:
+      # LAN only. The MCP endpoint has no auth — put a Cloudflare tunnel with
+      # Access in front of it if you ever want it from outside the house.
+      - "8089:8080"
+    volumes:
+      - nemlig-mcp-data:/data
+    environment:
+      TZ: Europe/Copenhagen
+      NEMLIG_USERNAME: ${NEMLIG_USERNAME:?set NEMLIG_USERNAME in .env}
+      NEMLIG_PASSWORD: ${NEMLIG_PASSWORD:?set NEMLIG_PASSWORD in .env}
+    # Chromium wants more shared memory than Docker's 64 MB default.
+    shm_size: 512mb
+
+volumes:
+  nemlig-mcp-data:

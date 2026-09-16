@@ -1,0 +1,20 @@
+# Runs the image published by CI. Drop this on the Proxmox host next to a .env
+# holding NEMLIG_USERNAME and NEMLIG_PASSWORD, then `docker compose up -d`.
+
+services:
+  nemlig-mcp:
+    image: ghcr.io/emilbm/nemlig-mcp:latest
+    container_name: nemlig-mcp
+    restart: unless-stopped
+    ports:
+      - "8089:8080"
+    volumes:
+      - nemlig-mcp-data:/data
+    environment:
+      TZ: Europe/Copenhagen
+      NEMLIG_USERNAME: ${NEMLIG_USERNAME:?set NEMLIG_USERNAME in .env}
+      NEMLIG_PASSWORD: ${NEMLIG_PASSWORD:?set NEMLIG_PASSWORD in .env}
+    shm_size: 512mb
+
+volumes:
+  nemlig-mcp-data:

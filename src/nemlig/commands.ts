@@ -8,7 +8,7 @@ import {
   type SearchResult,
 } from './types.js';
 
-const { webBaseUrl, searchBaseUrl, favouritesProductGroupId, searchPageSize } = config.nemlig;
+const { webBaseUrl, searchBaseUrl, searchPageSize } = config.nemlig;
 
 /**
  * The basket is the anchor for everything else: search and favourites both need
@@ -33,7 +33,7 @@ export async function searchProducts(client: NemligClient, basket: Basket, term:
 }
 
 export async function getFavouriteProducts(client: NemligClient, basket: Basket): Promise<ProductSummary[]> {
-  const { userId, buildStamp } = client.token;
+  const { userId, buildStamp, favouritesGroupId } = client.token;
 
   // Both of these are read off the site at login rather than pinned: the customer
   // id is whose list this is, and the stamp changes on every product reimport.
@@ -41,7 +41,7 @@ export async function getFavouriteProducts(client: NemligClient, basket: Basket)
     `/webapi/${buildStamp}/${basket.TimeslotUtc}/${basket.DeliveryZoneId}/${userId}/Products/GetByProductGroupId`,
     webBaseUrl,
   );
-  url.searchParams.set('productGroupId', favouritesProductGroupId);
+  url.searchParams.set('productGroupId', favouritesGroupId);
   url.searchParams.set('sortorder', 'default');
 
   const response = await client.get(url.toString(), { Referer: `${webBaseUrl}/favoritter/anbefalet-til-dig` });
@@ -52,8 +52,8 @@ export async function getFavouriteProducts(client: NemligClient, basket: Basket)
   if (!Array.isArray(result.Products)) {
     throw new NemligApiError(
       `Favourites came back without a Products array (keys: ${Object.keys(result).join(', ')}). ` +
-        `The product group id ${favouritesProductGroupId} is probably stale — read the current one off ` +
-        `${webBaseUrl}${config.nemlig.sessionProbePath} and set NEMLIG_FAVOURITES_GROUP_ID.`,
+        `Group id ${favouritesGroupId} was discovered from ${config.nemlig.sessionProbePath} at login, ` +
+        `so the page's shape has probably changed.`,
       response.status,
       '',
     );

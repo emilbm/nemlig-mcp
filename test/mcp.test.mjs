@@ -187,7 +187,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
     try {
       const result = await client.callTool({ name: 'get_favourite_products', arguments: {} });
       assert.equal(result.isError, true, 'an unparseable favourites response must not read as "no favourites"');
-      assert.match(result.content[0].text, /NEMLIG_FAVOURITES_GROUP_ID/);
+      assert.match(result.content[0].text, /discovered-group-id/, 'the error should name the group id it used');
     } finally {
       nemlig.staleFavourites(false);
       await client.close();

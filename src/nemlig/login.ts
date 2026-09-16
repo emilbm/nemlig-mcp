@@ -1,6 +1,6 @@
 import type { Browser, Page } from 'playwright';
 import { config, type NemligCredentials } from '../config.js';
-import type { NemligToken, PageSettings } from './types.js';
+import type { NemligToken, PageSettings, PageSpot } from './types.js';
 
 /**
  * Logging in is the one thing we cannot do with plain HTTP: Nemlig's login is a
@@ -81,7 +81,7 @@ export const playwrightLogin: LoginFn = async (credentials) => {
      * So we wait for the site itself to admit who we are: poll a page until its
      * Settings block carries a UserId. That is the real post-condition of login.
      */
-    const settings = await waitForAuthenticatedSession(page);
+    const { settings, spots } = await waitForAuthenticatedSession(page);
 
     // Only now are the cookies worth keeping.
     const cookies = await context.cookies();
@@ -94,6 +94,7 @@ export const playwrightLogin: LoginFn = async (credentials) => {
       expiresAt: expiryOf(token),
       userId: settings.UserId!,
       buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
+      favouritesGroupId: pickFavouritesGroup(spots),
     };
   } catch (error) {
     if (error instanceof LoginError) throw error;
@@ -108,25 +109,44 @@ export const playwrightLogin: LoginFn = async (credentials) => {
  * Fetching in the page context means the browser's own cookie jar is used, so
  * this measures exactly what a later fetch from Node will be able to reproduce.
  */
-async function waitForAuthenticatedSession(page: Page): Promise<PageSettings> {
+async function waitForAuthenticatedSession(page: Page): Promise<{ settings: PageSettings; spots: PageSpot[] }> {
   const deadline = Date.now() + config.login.sessionTimeoutMs;
-  let last: PageSettings | undefined;
+  let last: PageSettings | null = null;
 
   while (Date.now() < deadline) {
-    const settings = await page
+    const probe = await page
       .evaluate(
         async (path) => {
           const response = await fetch(path, { headers: { Accept: 'application/json' } });
           if (!response.ok) return null;
-          const body = (await response.json()) as { Settings?: unknown };
-          return (body.Settings ?? null) as PageSettings | null;
+          const body = (await response.json()) as { Settings?: unknown; content?: unknown };
+
+          // The page nests its spots in ribbons of varying depth, so walk the whole
+          // thing rather than assuming a shape that a redesign would change.
+          const spots: Array<{ heading: string; productGroupId: string; totalProducts: number }> = [];
+          const walk = (node: unknown): void => {
+            if (Array.isArray(node)) return node.forEach(walk);
+            if (!node || typeof node !== 'object') return;
+            const record = node as Record<string, unknown>;
+            if (typeof record['ProductGroupId'] === 'string') {
+              spots.push({
+                heading: typeof record['Heading'] === 'string' ? record['Heading'] : '',
+                productGroupId: record['ProductGroupId'],
+                totalProducts: typeof record['TotalProducts'] === 'number' ? record['TotalProducts'] : 0,
+              });
+            }
+            Object.values(record).forEach(walk);
+          };
+          walk(body.content);
+
+          return { settings: (body.Settings ?? null) as PageSettings | null, spots };
         },
         config.nemlig.sessionProbePath,
       )
       .catch(() => null);
 
-    if (settings?.UserId) return settings;
-    last = settings ?? last;
+    if (probe?.settings?.UserId) return { settings: probe.settings, spots: probe.spots };
+    last = probe?.settings ?? last;
     await page.waitForTimeout(500);
   }
 
@@ -134,6 +154,26 @@ async function waitForAuthenticatedSession(page: Page): Promise<PageSettings> {
     'Nemlig issued a token but the website session stayed anonymous (Settings.UserId was null). ' +
       'Account-scoped calls would silently return nothing, so the login is being treated as failed. ' +
       `Last seen: ${JSON.stringify(last ?? 'no readable Settings')}`,
+  );
+}
+
+/**
+ * Picks the favourites list out of the spots on the page. Matched on its heading
+ * rather than its id, because the id is exactly the thing that changes; an explicit
+ * id override stays available for when the Danish copy changes instead.
+ */
+export function pickFavouritesGroup(spots: PageSpot[]): string {
+  const override = config.nemlig.favouritesProductGroupId;
+  if (override) return override;
+
+  const match = spots.find((spot) => config.nemlig.favouritesHeadingPattern.test(spot.heading));
+  if (match) return match.productGroupId;
+
+  throw new LoginError(
+    `Could not find the favourites list on ${config.nemlig.sessionProbePath}: no spot's heading matched ` +
+      `${config.nemlig.favouritesHeadingPattern}. Found ${
+        spots.length ? spots.map((s) => `"${s.heading}" (${s.productGroupId}, ${s.totalProducts})`).join('; ') : 'no spots at all'
+      }. Set NEMLIG_FAVOURITES_GROUP_ID to pin it, or NEMLIG_FAVOURITES_HEADING to match the new wording.`,
   );
 }
 

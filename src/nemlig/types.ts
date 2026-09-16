@@ -20,6 +20,19 @@ export interface NemligToken {
    * path of the favourites URL, so it is read fresh at login rather than pinned.
    */
   buildStamp: string;
+  /**
+   * Sitecore content id of the favourites list, discovered from the same page that
+   * confirms the session. Pinning it meant a republish silently emptied favourites;
+   * rediscovering it on every login means that heals itself within one token life.
+   */
+  favouritesGroupId: string;
+}
+
+/** A product-list spot on a Sitecore page: which list, and how many are in it. */
+export interface PageSpot {
+  heading: string;
+  productGroupId: string;
+  totalProducts: number;
 }
 
 /** The subset of a Sitecore page's `Settings` block we rely on. */

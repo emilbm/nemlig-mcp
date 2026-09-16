@@ -127,6 +127,7 @@ export function createFakeLogin(fakeNemlig) {
       expiresAt: Date.now() + login.lifetimeMs,
       userId: '2168977',
       buildStamp: `stamp-${issued}`,
+      favouritesGroupId: 'discovered-group-id',
     };
   };
   login.lifetimeMs = 5 * 60 * 1000;

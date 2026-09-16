@@ -25,8 +25,9 @@ establishing the website session that account-scoped endpoints read. Snapshot th
 cookies in between and you get a token that authenticates while the basket and
 favourites come back empty — as an anonymous visitor, with no error. So login is
 not considered done until a page reports a `Settings.UserId`. That check also
-yields the customer id and the cache-busting build stamp, which is why neither is
-hardcoded any more.
+yields everything else that used to be hardcoded — the customer id, the
+cache-busting build stamp, and the favourites list id — from the one request we
+were already making.
 
 **Tokens last five minutes, and expiry does not fail loudly.** An expired token
 gets the same silent anonymous treatment: `200`, empty basket, nothing wrong on
@@ -75,7 +76,8 @@ a session started by one account is never handed to another.
 | `NEMLIG_REFRESH_MARGIN_MS` | `45000` | Re-authenticate this long before the five-minute token expires. |
 | `NEMLIG_SESSION_TTL_MS` | `604800000` (7 days) | Untouched sessions are pruned hourly. |
 | `NEMLIG_DATA_DIR` | `/data` | Where `sessions.json` lives. |
-| `NEMLIG_FAVOURITES_GROUP_ID` | `10040a7d-…` | Sitecore id of the favourites list; see *Known fragility*. |
+| `NEMLIG_FAVOURITES_HEADING` | `favoritter` | Pattern matching the favourites list's heading on the probe page. |
+| `NEMLIG_FAVOURITES_GROUP_ID` | — | Pins the favourites list id and skips discovery. Escape hatch only. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address. |
 
 `.env.example` has the rest.
@@ -128,14 +130,13 @@ the website changes. The two places that will go first:
 - **The login flow.** `src/nemlig/login.ts` fills `[name='userEmail']` and
   `[name='userPassword']` and waits for `POST /webapi/Token`. If Nemlig redesigns
   the login page, that is the file to fix.
-- **The favourites product group id.** `10040a7d-a9ed-4f0e-b1a2-0febd90427c1` is
-  the Sitecore content id of "Har du husket dine favoritter?". It identifies which
-  list, not whose — the customer id in the URL path does that — but Nemlig changes
-  it when they republish content. A stale one returns `200` with no `Products`
-  array, which the server now reports as an error rather than as "no favourites".
-  Read the current one from `Settings` at
-  `https://www.nemlig.com/favoritter/anbefalet-til-dig?GetAsJson=1` and set
-  `NEMLIG_FAVOURITES_GROUP_ID`.
+- **The favourites list's heading.** The list is found on the probe page by its
+  heading — "Har du husket dine favoritter?" — rather than by its Sitecore id,
+  because the id is the thing that changes on a republish. Discovery runs on every
+  login, so a new id heals itself within one token lifetime. If Nemlig rewrites the
+  Danish copy instead, login fails with the headings it actually found; set
+  `NEMLIG_FAVOURITES_HEADING` to match the new wording, or
+  `NEMLIG_FAVOURITES_GROUP_ID` to pin the id and skip discovery.
 
 ### Headless and bot checks
 

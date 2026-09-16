@@ -70,11 +70,14 @@ export const config = {
     /** Page read at login to learn the customer id and the cache-busting build stamp. */
     sessionProbePath: str('NEMLIG_SESSION_PROBE_PATH', '/favoritter/anbefalet-til-dig?GetAsJson=1'),
     /**
-     * Sitecore content id of the "Har du husket dine favoritter?" list. It identifies
-     * which list, not whose — the customer id in the URL path does that — but Nemlig
-     * changes it when they republish content, so it stays overridable.
+     * The favourites list is found by its heading rather than pinned by id, because
+     * the id is what Nemlig changes on a republish. Today's heading is
+     * "Har du husket dine favoritter?"; the pattern only has to be distinctive
+     * enough to tell it from the recommendation lists beside it on the page.
      */
-    favouritesProductGroupId: str('NEMLIG_FAVOURITES_GROUP_ID', '10040a7d-a9ed-4f0e-b1a2-0febd90427c1'),
+    favouritesHeadingPattern: new RegExp(str('NEMLIG_FAVOURITES_HEADING', 'favoritter'), 'i'),
+    /** Escape hatch: pin the id explicitly and skip discovery, if the copy changes. */
+    favouritesProductGroupId: str('NEMLIG_FAVOURITES_GROUP_ID', ''),
     searchPageSize: int('NEMLIG_SEARCH_PAGE_SIZE', 20),
     userAgent: str(
       'NEMLIG_USER_AGENT',

@@ -118,7 +118,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
     const favourites = nemlig.state.requests
       .filter((request) => request.path.endsWith('/Products/GetByProductGroupId'))
       .at(-1);
-    assert.equal(favourites.headers.referer, `${nemlig.baseUrl}/mit-nemlig`);
+    assert.equal(favourites.headers.referer, `${nemlig.baseUrl}/favoritter/anbefalet-til-dig`);
     await client.close();
   });
 
@@ -160,6 +160,38 @@ describe('nemlig-mcp over streamable HTTP', () => {
     assert.equal(login.count, before + 1, 'expiry should cost exactly one new login');
     assert.equal(result.products.length, 1, 'the call should succeed on the retry, not surface the 401');
     await client.close();
+  });
+
+  it('re-authenticates before the token expires, without waiting for a 401', async () => {
+    // Nemlig answers an expired token as an anonymous visitor: 200, empty basket,
+    // empty favourites. Nothing ever returns 401, so expiry has to be caught from
+    // the JWT's own exp before the call goes out.
+    const client = await connect();
+    login.lifetimeMs = 10_000; // inside the refresh margin, so already due
+    try {
+      const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+      const before = login.count;
+
+      payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } }));
+
+      assert.equal(login.count, before + 1, 'a token inside the refresh margin must be replaced up front');
+    } finally {
+      login.lifetimeMs = 5 * 60 * 1000;
+      await client.close();
+    }
+  });
+
+  it('reports a stale favourites group instead of returning an empty list', async () => {
+    const client = await connect();
+    nemlig.staleFavourites();
+    try {
+      const result = await client.callTool({ name: 'get_favourite_products', arguments: {} });
+      assert.equal(result.isError, true, 'an unparseable favourites response must not read as "no favourites"');
+      assert.match(result.content[0].text, /NEMLIG_FAVOURITES_GROUP_ID/);
+    } finally {
+      nemlig.staleFavourites(false);
+      await client.close();
+    }
   });
 
   it('reuses the newest session when the caller omits sessionId', async () => {

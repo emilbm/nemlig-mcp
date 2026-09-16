@@ -15,12 +15,23 @@ Chromium once, catches the JWT that the form's token request returns, keeps the
 cookies it set alongside it, and calls it a **session**.
 
 Everything after that is ordinary `fetch` against Nemlig's web API, reusing that
-one token. A session is the unit of "don't log in again" — hold on to its
-`sessionId` for a whole shopping trip and the browser never starts a second time.
+token. Sessions are written to `/data/sessions.json` (mode `0600`), so a container
+restart does not cost a fresh login either.
 
-Sessions are written to `/data/sessions.json` (mode `0600`), so a container
-restart does not cost a fresh login either. If Nemlig rejects a token mid-session,
-the server logs in again and retries the call once, which the client never sees.
+Two things about that login are worth knowing, because both cost real debugging:
+
+**A token is not a session.** Nemlig issues the JWT *before* it finishes
+establishing the website session that account-scoped endpoints read. Snapshot the
+cookies in between and you get a token that authenticates while the basket and
+favourites come back empty — as an anonymous visitor, with no error. So login is
+not considered done until a page reports a `Settings.UserId`. That check also
+yields the customer id and the cache-busting build stamp, which is why neither is
+hardcoded any more.
+
+**Tokens last five minutes, and expiry does not fail loudly.** An expired token
+gets the same silent anonymous treatment: `200`, empty basket, nothing wrong on
+the wire. Waiting for a `401` would never fire, so expiry is read from the JWT's
+own `exp` and the token is replaced before the call goes out.
 
 ```
 MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig web API (fetch + JWT)
@@ -60,9 +71,11 @@ a session started by one account is never handed to another.
 | `NEMLIG_ALLOW_HEADER_CREDENTIALS` | `true` | Set `false` to pin the server to the env account. |
 | `NEMLIG_HEADLESS` | `true` | See *Headless and bot checks* below. |
 | `NEMLIG_LOGIN_TIMEOUT_MS` | `60000` | How long to wait for the token response. |
+| `NEMLIG_SESSION_READY_TIMEOUT_MS` | `20000` | How long to wait for the site to stop treating us as anonymous. |
+| `NEMLIG_REFRESH_MARGIN_MS` | `45000` | Re-authenticate this long before the five-minute token expires. |
 | `NEMLIG_SESSION_TTL_MS` | `604800000` (7 days) | Untouched sessions are pruned hourly. |
 | `NEMLIG_DATA_DIR` | `/data` | Where `sessions.json` lives. |
-| `NEMLIG_WEBAPI_BUILD_ID` | `a2CUwjmB-wDTdpgqB` | Opaque segment in the favourites URL; see *Known fragility*. |
+| `NEMLIG_FAVOURITES_GROUP_ID` | `10040a7d-…` | Sitecore id of the favourites list; see *Known fragility*. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address. |
 
 `.env.example` has the rest.
@@ -115,9 +128,14 @@ the website changes. The two places that will go first:
 - **The login flow.** `src/nemlig/login.ts` fills `[name='userEmail']` and
   `[name='userPassword']` and waits for `POST /webapi/Token`. If Nemlig redesigns
   the login page, that is the file to fix.
-- **The favourites URL**, which contains `a2CUwjmB-wDTdpgqB` — a build id from
-  Nemlig's own frontend. If favourites start returning 404, read a fresh one off
-  the network tab and set `NEMLIG_WEBAPI_BUILD_ID`.
+- **The favourites product group id.** `10040a7d-a9ed-4f0e-b1a2-0febd90427c1` is
+  the Sitecore content id of "Har du husket dine favoritter?". It identifies which
+  list, not whose — the customer id in the URL path does that — but Nemlig changes
+  it when they republish content. A stale one returns `200` with no `Products`
+  array, which the server now reports as an error rather than as "no favourites".
+  Read the current one from `Settings` at
+  `https://www.nemlig.com/favoritter/anbefalet-til-dig?GetAsJson=1` and set
+  `NEMLIG_FAVOURITES_GROUP_ID`.
 
 ### Headless and bot checks
 
@@ -127,6 +145,15 @@ headless Chromium with a normal user agent. If Nemlig ever refuses that, the
 options are `NEMLIG_HEADLESS=false` with an X server in the container, or running
 the login on a machine that has a display. It has not been a problem so far, but
 it is the assumption most likely to break.
+
+### The five-minute re-login
+
+Because tokens expire in five minutes and there is no refresh flow implemented,
+a shopping session longer than that pays for a fresh headless browser login every
+few minutes — roughly five to ten seconds each time, invisible but not free. The
+token response may well carry a `refresh_token` that would avoid relaunching a
+browser at all; the original prototype discarded it and so does this, so nobody
+has looked. That is the obvious next improvement.
 
 ## Upgrading Playwright
 

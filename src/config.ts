@@ -49,8 +49,16 @@ export const config = {
     /** Real Chrome, headful, is the most likely to survive Nemlig's bot checks — but a container has no display. */
     headless: bool('NEMLIG_HEADLESS', true),
     timeoutMs: int('NEMLIG_LOGIN_TIMEOUT_MS', 60_000),
+    /** How long to wait after the token for the website session to become non-anonymous. */
+    sessionTimeoutMs: int('NEMLIG_SESSION_READY_TIMEOUT_MS', 20_000),
     /** Kept short by default: a browser launch per session is the expensive part we are caching away. */
     maxConcurrent: int('NEMLIG_LOGIN_MAX_CONCURRENT', 1),
+    /**
+     * Re-authenticate this long before `exp`. Nemlig's tokens last five minutes and
+     * an expired one does not fail — it silently answers as an anonymous visitor —
+     * so the margin has to cover a slow call rather than just clock skew.
+     */
+    refreshMarginMs: int('NEMLIG_REFRESH_MARGIN_MS', 45_000),
   },
 
   /** A session is forgotten once untouched for this long; its next use logs in again. */
@@ -59,13 +67,14 @@ export const config = {
   nemlig: {
     webBaseUrl: str('NEMLIG_WEB_BASE_URL', 'https://www.nemlig.com'),
     searchBaseUrl: str('NEMLIG_SEARCH_BASE_URL', 'https://webapi.prod.knl.nemlig.it'),
+    /** Page read at login to learn the customer id and the cache-busting build stamp. */
+    sessionProbePath: str('NEMLIG_SESSION_PROBE_PATH', '/favoritter/anbefalet-til-dig?GetAsJson=1'),
     /**
-     * Opaque segment in the favourites URL that Nemlig bakes into its own
-     * frontend build. If favourites start 404-ing, read a fresh one off a
-     * request in the browser's network tab and set it here.
+     * Sitecore content id of the "Har du husket dine favoritter?" list. It identifies
+     * which list, not whose — the customer id in the URL path does that — but Nemlig
+     * changes it when they republish content, so it stays overridable.
      */
-    webapiBuildId: str('NEMLIG_WEBAPI_BUILD_ID', 'a2CUwjmB-wDTdpgqB'),
-    favouritesProductGroupId: str('NEMLIG_FAVOURITES_GROUP_ID', 'c33e7d8a-f1d5-49ee-a39f-4f670612524e'),
+    favouritesProductGroupId: str('NEMLIG_FAVOURITES_GROUP_ID', '10040a7d-a9ed-4f0e-b1a2-0febd90427c1'),
     searchPageSize: int('NEMLIG_SEARCH_PAGE_SIZE', 20),
     userAgent: str(
       'NEMLIG_USER_AGENT',

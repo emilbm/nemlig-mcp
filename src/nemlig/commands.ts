@@ -8,7 +8,7 @@ import {
   type SearchResult,
 } from './types.js';
 
-const { webBaseUrl, searchBaseUrl, webapiBuildId, favouritesProductGroupId, searchPageSize } = config.nemlig;
+const { webBaseUrl, searchBaseUrl, favouritesProductGroupId, searchPageSize } = config.nemlig;
 
 /**
  * The basket is the anchor for everything else: search and favourites both need
@@ -33,17 +33,32 @@ export async function searchProducts(client: NemligClient, basket: Basket, term:
 }
 
 export async function getFavouriteProducts(client: NemligClient, basket: Basket): Promise<ProductSummary[]> {
+  const { userId, buildStamp } = client.token;
+
+  // Both of these are read off the site at login rather than pinned: the customer
+  // id is whose list this is, and the stamp changes on every product reimport.
   const url = new URL(
-    `/webapi/${webapiBuildId}/${basket.TimeslotUtc}/1/2168977/Products/GetByProductGroupId`,
+    `/webapi/${buildStamp}/${basket.TimeslotUtc}/${basket.DeliveryZoneId}/${userId}/Products/GetByProductGroupId`,
     webBaseUrl,
   );
   url.searchParams.set('productGroupId', favouritesProductGroupId);
   url.searchParams.set('sortorder', 'default');
 
-  // Nemlig serves this one only to its own "mit-nemlig" page.
-  const response = await client.get(url.toString(), { Referer: `${webBaseUrl}/mit-nemlig` });
+  const response = await client.get(url.toString(), { Referer: `${webBaseUrl}/favoritter/anbefalet-til-dig` });
   const result = await readJson<ProductList>(response, 'fetch favourite products');
-  return (result.Products ?? []).map(summarizeProduct);
+
+  // An unexpected shape here used to read as "no favourites", which is how a stale
+  // group id and an anonymous session both hid for as long as they did.
+  if (!Array.isArray(result.Products)) {
+    throw new NemligApiError(
+      `Favourites came back without a Products array (keys: ${Object.keys(result).join(', ')}). ` +
+        `The product group id ${favouritesProductGroupId} is probably stale — read the current one off ` +
+        `${webBaseUrl}${config.nemlig.sessionProbePath} and set NEMLIG_FAVOURITES_GROUP_ID.`,
+      response.status,
+      '',
+    );
+  }
+  return result.Products.map(summarizeProduct);
 }
 
 export interface AddToBasketResult {

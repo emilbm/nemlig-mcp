@@ -28,6 +28,16 @@ export class NemligApiError extends Error {
 export class NemligClient {
   constructor(readonly token: NemligToken) {}
 
+  /**
+   * Nemlig does not answer an expired token with a 401 — it answers as an anonymous
+   * visitor, with an empty basket and empty favourites. So expiry has to be caught
+   * here, from the JWT's own `exp`, before a call goes out and quietly succeeds
+   * against the wrong identity.
+   */
+  isExpired(marginMs: number): boolean {
+    return Date.now() + marginMs >= this.token.expiresAt;
+  }
+
   get(url: string, headers?: Record<string, string>): Promise<Response> {
     return this.request(url, { method: 'GET', headers });
   }

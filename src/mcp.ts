@@ -11,9 +11,9 @@ export const SERVER_VERSION = '1.0.0';
 export const INSTRUCTIONS = [
   'Tools for shopping groceries at Nemlig.com on the account this server is configured with.',
   '',
-  'A session holds one browser login and is reused for every call, so keep using the same',
-  'sessionId for a whole shopping trip. Omitting sessionId reuses the most recent session, or',
-  'starts one — call new_session only when you deliberately want a fresh basket context.',
+  'A session is reused across calls and refreshes its own login when it needs to, so keep',
+  'using the same sessionId for a whole shopping trip. Omitting sessionId reuses the most',
+  'recent session, or starts one — call new_session only for a deliberately fresh context.',
   '',
   'Typical flow: get_favourite_products to see what the household usually buys, search_products',
   'to find anything else, then add_to_basket with the product id. Prices are in DKK.',

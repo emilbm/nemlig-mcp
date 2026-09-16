@@ -8,6 +8,7 @@ export async function startFakeNemlig() {
   const state = {
     /** Tokens this server still accepts. The fake login mints "token-1", "token-2", ... */
     validTokens: new Set(['token-1']),
+    favouritesStale: false,
     requests: [],
     basketLines: [],
   };
@@ -54,6 +55,9 @@ export async function startFakeNemlig() {
     }
 
     if (url.pathname.endsWith('/Products/GetByProductGroupId')) {
+      // A stale group id gets a 200 with no Products array, not a 404 — which is
+      // exactly how the real thing hid a broken favourites call as "none".
+      if (state.favouritesStale) return send(200, { Message: 'Unknown product group', products: null });
       return send(200, {
         NumFound: 1,
         Products: [
@@ -91,6 +95,9 @@ export async function startFakeNemlig() {
     expireTokens() {
       state.validTokens.clear();
     },
+    staleFavourites(value = true) {
+      state.favouritesStale = value;
+    },
     accept(token) {
       state.validTokens.add(token);
     },
@@ -112,8 +119,17 @@ export function createFakeLogin(fakeNemlig) {
     calls.push(credentials);
     const token = `token-${issued}`;
     fakeNemlig.accept(token);
-    return { accessToken: token, cookieHeader: `sid=cookie-${issued}`, acquiredAt: Date.now() };
+    return {
+      accessToken: token,
+      cookieHeader: `sid=cookie-${issued}`,
+      acquiredAt: Date.now(),
+      // Real tokens last five minutes; `lifetimeMs` lets a test make one stale.
+      expiresAt: Date.now() + login.lifetimeMs,
+      userId: '2168977',
+      buildStamp: `stamp-${issued}`,
+    };
   };
+  login.lifetimeMs = 5 * 60 * 1000;
   login.calls = calls;
   Object.defineProperty(login, 'count', { get: () => issued });
   return login;

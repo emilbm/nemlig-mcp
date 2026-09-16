@@ -1,4 +1,4 @@
-import type { NemligCredentials } from './config.js';
+import { config, type NemligCredentials } from './config.js';
 import { NemligClient, TokenExpiredError } from './nemlig/client.js';
 import { getBasket } from './nemlig/commands.js';
 import type { LoginFn } from './nemlig/login.js';
@@ -75,7 +75,16 @@ export class SessionManager {
     credentials: NemligCredentials,
     work: (client: NemligClient, sessionId: string) => Promise<T>,
   ): Promise<T> {
-    const client = await this.clientFor(sessionId, credentials);
+    let client = await this.clientFor(sessionId, credentials);
+
+    // Checked up front, because Nemlig answers an expired token as an anonymous
+    // visitor rather than with a 401 — the call would otherwise "succeed" against
+    // the wrong identity, returning an empty basket or adding to a stray one.
+    if (client.isExpired(config.login.refreshMarginMs)) {
+      this.baskets.delete(sessionId);
+      client = await this.authenticate(sessionId, credentials);
+    }
+
     try {
       const result = await work(client, sessionId);
       await this.store.touch(sessionId);

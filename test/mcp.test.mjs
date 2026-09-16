@@ -64,6 +64,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
       'end_session',
       'get_basket',
       'get_favourite_products',
+      'get_favourites_on_offer',
       'new_session',
       'search_products',
     ]);
@@ -119,6 +120,31 @@ describe('nemlig-mcp over streamable HTTP', () => {
       .filter((request) => request.path.endsWith('/Products/GetByProductGroupId'))
       .at(-1);
     assert.equal(favourites.headers.referer, `${nemlig.baseUrl}/favoritter/anbefalet-til-dig`);
+    await client.close();
+  });
+
+  it('returns only the favourites that are on offer, with the promotion described', async () => {
+    const client = await connect();
+    const all = payload(await client.callTool({ name: 'get_favourite_products', arguments: {} }));
+    const offers = payload(await client.callTool({ name: 'get_favourites_on_offer', arguments: {} }));
+
+    assert.equal(all.products.length, 5);
+    assert.equal(offers.products.length, 4, 'the full-price product must be filtered out');
+    assert.ok(
+      offers.products.every((product) => product.offer),
+      'every product returned must carry its offer',
+    );
+
+    // One assertion per campaign shape Nemlig uses, so a format change is caught.
+    const described = Object.fromEntries(offers.products.map((p) => [p.name, p.offer.description]));
+    assert.equal(described['Hvidløg øko.'], '3 for 15 kr');
+    assert.equal(described['Farfalle'], '40% off — now 19,05 kr');
+    assert.equal(described['Kyllingebrystfilet'], 'Save 32,95 kr');
+    assert.equal(described['Serrano Reserva'], 'Mix 2 for 36 kr');
+
+    const garlic = offers.products.find((p) => p.name === 'Hvidløg øko.');
+    assert.equal(garlic.offer.minQuantity, 3, 'multi-buy offers must say how many are needed');
+    assert.equal(garlic.offer.offerPrice, 15);
     await client.close();
   });
 

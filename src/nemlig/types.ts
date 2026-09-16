@@ -49,12 +49,45 @@ export interface Availability {
   IsDeliveryAvailable: boolean;
 }
 
+/**
+ * Nemlig models every promotion as one of four campaign shapes. The fields that
+ * matter differ per type, which is why `describeOffer` switches on `Type` rather
+ * than trying to read one common "discount" field.
+ */
+export interface Campaign {
+  Type: string;
+  /** "2 for 77" style offers: buy this many, pay TotalPrice for the lot. */
+  MinQuantity?: number;
+  TotalPrice?: number;
+  DiscountPercent?: number;
+  DiscountSavings?: number;
+  CampaignPrice?: number;
+  IntervalEnd?: string;
+}
+
 export interface Product {
   Id: string;
   Name: string;
   Price: number;
   Availability?: Availability;
   Labels?: string[];
+  Campaign?: Campaign | null;
+  Description?: string;
+  Brand?: string;
+}
+
+/** A promotion, flattened into something a model can compare across products. */
+export interface Offer {
+  /** Nemlig's type with its `ProductCampaign` prefix dropped. */
+  type: string;
+  /** One line a person would recognise from the shelf edge: "3 for 15 kr", "40% off". */
+  description: string;
+  minQuantity?: number;
+  /** What the offer costs: the bundle total, or the discounted unit price. */
+  offerPrice?: number;
+  savings?: number;
+  percent?: number;
+  endsAt?: string;
 }
 
 export interface ProductList {
@@ -95,9 +128,12 @@ export interface ProductSummary {
   inStock: boolean;
   deliverable: boolean;
   labels: string[];
+  /** Present only when the product is actually on offer, so its absence means full price. */
+  offer?: Offer;
 }
 
 export function summarizeProduct(product: Product): ProductSummary {
+  const offer = product.Campaign ? describeOffer(product.Campaign) : undefined;
   return {
     id: product.Id,
     name: product.Name,
@@ -105,5 +141,55 @@ export function summarizeProduct(product: Product): ProductSummary {
     inStock: product.Availability?.IsAvailableInStock ?? true,
     deliverable: product.Availability?.IsDeliveryAvailable ?? true,
     labels: product.Labels ?? [],
+    ...(offer ? { offer } : {}),
   };
+}
+
+/** Formats a DKK amount the Danish way, dropping the decimals when they are zero. */
+function kr(amount: number): string {
+  return Number.isInteger(amount) ? `${amount} kr` : `${amount.toFixed(2).replace('.', ',')} kr`;
+}
+
+export function describeOffer(campaign: Campaign): Offer {
+  const type = campaign.Type.replace(/^ProductCampaign/, '');
+  const base: Offer = {
+    type,
+    description: type,
+    ...(campaign.MinQuantity ? { minQuantity: campaign.MinQuantity } : {}),
+    ...(campaign.DiscountSavings ? { savings: campaign.DiscountSavings } : {}),
+    ...(campaign.DiscountPercent ? { percent: campaign.DiscountPercent } : {}),
+    ...(campaign.IntervalEnd ? { endsAt: campaign.IntervalEnd } : {}),
+  };
+
+  switch (campaign.Type) {
+    // Buy N, pay TotalPrice for all N — the price only applies at that quantity.
+    case 'ProductCampaignBuyXForY':
+    case 'ProductCampaignMixOffer': {
+      const mix = campaign.Type === 'ProductCampaignMixOffer' ? 'Mix ' : '';
+      const quantity = campaign.MinQuantity ?? 0;
+      const total = campaign.TotalPrice ?? campaign.CampaignPrice;
+      return {
+        ...base,
+        ...(total === undefined ? {} : { offerPrice: total }),
+        description: total === undefined ? `${mix}multi-buy` : `${mix}${quantity} for ${kr(total)}`,
+      };
+    }
+    case 'ProductCampaignDiscountPercent':
+      return {
+        ...base,
+        ...(campaign.CampaignPrice === undefined ? {} : { offerPrice: campaign.CampaignPrice }),
+        description: `${campaign.DiscountPercent}% off${campaign.CampaignPrice === undefined ? '' : ` — now ${kr(campaign.CampaignPrice)}`}`,
+      };
+    case 'ProductCampaignDiscount':
+      return {
+        ...base,
+        ...(campaign.CampaignPrice === undefined ? {} : { offerPrice: campaign.CampaignPrice }),
+        description: campaign.DiscountSavings
+          ? `Save ${kr(campaign.DiscountSavings)}`
+          : `Now ${kr(campaign.CampaignPrice ?? 0)}`,
+      };
+    default:
+      // An unknown type is still worth surfacing — better a bare label than dropping the offer.
+      return base;
+  }
 }

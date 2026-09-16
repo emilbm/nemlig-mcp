@@ -58,14 +58,44 @@ export async function startFakeNemlig() {
       // A stale group id gets a 200 with no Products array, not a 404 — which is
       // exactly how the real thing hid a broken favourites call as "none".
       if (state.favouritesStale) return send(200, { Message: 'Unknown product group', products: null });
+      // Campaign shapes copied from real responses: one of each type Nemlig uses,
+      // plus a full-price product so the on-offer filter has something to exclude.
       return send(200, {
-        NumFound: 1,
+        NumFound: 5,
         Products: [
           {
             Id: '9098765',
             Name: 'Letmælk 1L',
             Price: 12.5,
             Availability: { IsAvailableInStock: true, IsDeliveryAvailable: false },
+            Labels: [],
+          },
+          {
+            Id: '100160',
+            Name: 'Hvidløg øko.',
+            Price: 5.5,
+            Campaign: { MinQuantity: 3, TotalPrice: 15, CampaignPrice: 15, Type: 'ProductCampaignBuyXForY', IntervalEnd: '2026-09-20T21:59:59Z' },
+            Labels: ['Discount'],
+          },
+          {
+            Id: '5046029',
+            Name: 'Farfalle',
+            Price: 19.05,
+            Campaign: { DiscountPercent: 40, DiscountSavings: 12.7, CampaignPrice: 19.05, Type: 'ProductCampaignDiscountPercent' },
+            Labels: [],
+          },
+          {
+            Id: '5069520',
+            Name: 'Kyllingebrystfilet',
+            Price: 85,
+            Campaign: { DiscountSavings: 32.95, CampaignPrice: 85, Type: 'ProductCampaignDiscount' },
+            Labels: [],
+          },
+          {
+            Id: '5030750',
+            Name: 'Serrano Reserva',
+            Price: 21.25,
+            Campaign: { MinQuantity: 2, TotalPrice: 36, CampaignPrice: 36, Type: 'ProductCampaignMixOffer' },
             Labels: [],
           },
         ],

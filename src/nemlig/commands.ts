@@ -61,6 +61,17 @@ export async function getFavouriteProducts(client: NemligClient, basket: Basket)
   return result.Products.map(summarizeProduct);
 }
 
+/**
+ * The household's favourites that are currently on promotion — Nemlig's own
+ * "Favoritter på tilbud". Derived from the favourites list rather than from the
+ * site-wide offers page, because /tilbud is every offer in the shop and says
+ * nothing about whether this account buys the product.
+ */
+export async function getFavouritesOnOffer(client: NemligClient, basket: Basket): Promise<ProductSummary[]> {
+  const favourites = await getFavouriteProducts(client, basket);
+  return favourites.filter((product) => product.offer);
+}
+
 export interface AddToBasketResult {
   productId: string;
   quantity: number;

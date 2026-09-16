@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { NemligCredentials } from './config.js';
-import { addToBasket, getFavouriteProducts, searchProducts } from './nemlig/commands.js';
+import { addToBasket, getFavouriteProducts, getFavouritesOnOffer, searchProducts } from './nemlig/commands.js';
 import type { SessionManager } from './sessions.js';
 
 export const SERVER_NAME = 'nemlig';
@@ -100,6 +100,25 @@ export function createMcpServer(sessions: SessionManager, credentials: NemligCre
       const products = await sessions.withClient(id, credentials, async (client) => {
         const basket = await sessions.basketFor(id, client);
         return getFavouriteProducts(client, basket);
+      });
+      return json({ sessionId: id, products });
+    },
+  );
+
+  server.registerTool(
+    'get_favourites_on_offer',
+    {
+      title: 'Get frequently bought products that are on offer',
+      description:
+        "The account's frequently bought products that are currently on promotion — Nemlig's \"Favoritter på tilbud\". The best place to start a shop: things the household actually buys, at a discount. Each product carries an `offer` describing the promotion, e.g. \"3 for 15 kr\" or \"40% off\". Note that multi-buy offers only apply at their `minQuantity`.",
+      inputSchema: { sessionId: sessionIdSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ sessionId }) => {
+      const id = await sessions.resolve(sessionId, credentials);
+      const products = await sessions.withClient(id, credentials, async (client) => {
+        const basket = await sessions.basketFor(id, client);
+        return getFavouritesOnOffer(client, basket);
       });
       return json({ sessionId: id, products });
     },

@@ -48,6 +48,7 @@ MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig w
 | `get_basket` | The current basket, including its delivery slot. |
 | `search_products` | Searches the catalogue (Danish terms) for a product id. |
 | `get_favourite_products` | The account's frequently bought products. |
+| `get_favourites_on_offer` | Those of them currently on promotion, with the offer described. |
 | `add_to_basket` | Adds a product id to the basket. |
 | `end_session` | Forgets a session and its stored token. |
 
@@ -56,6 +57,13 @@ reuses the account's most recent session, or starts one. Search and favourites
 both need the basket's delivery slot to return real prices and stock, so the
 server fetches the basket once per session and caches it — `add_to_basket`
 invalidates that cache.
+
+`get_favourites_on_offer` is derived from the favourites list rather than from
+Nemlig's site-wide `/tilbud` page: that page is every offer in the shop and says
+nothing about whether this household buys the product. Each result carries an
+`offer` with a shelf-edge description ("3 for 15 kr", "40% off") plus the
+structured `minQuantity` / `offerPrice` / `savings`, because multi-buy offers only
+apply at their quantity — a single item is still full price.
 
 Nothing here checks out an order. The basket is as far as it goes, on purpose.
 

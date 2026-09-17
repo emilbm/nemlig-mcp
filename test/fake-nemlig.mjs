@@ -185,3 +185,22 @@ export function createFakeLogin(fakeNemlig) {
   Object.defineProperty(login, 'count', { get: () => issued });
   return login;
 }
+
+/**
+ * Refresh without a browser: the real one GETs a service-account token and proves
+ * the cookies still identify the account. Here it just mints the next token and
+ * can be told the cookies have lapsed.
+ */
+export function createFakeRefresh(fakeNemlig, login) {
+  let calls = 0;
+  const refresh = async (token) => {
+    calls++;
+    if (refresh.cookiesExpired) throw new Error('cookies no longer identify the account');
+    const next = `refreshed-${calls}`;
+    fakeNemlig.accept(next);
+    return { ...token, accessToken: next, acquiredAt: Date.now(), expiresAt: Date.now() + login.lifetimeMs };
+  };
+  refresh.cookiesExpired = false;
+  Object.defineProperty(refresh, 'count', { get: () => calls });
+  return refresh;
+}

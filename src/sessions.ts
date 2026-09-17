@@ -1,8 +1,8 @@
 import { config, type NemligCredentials } from './config.js';
 import { NemligClient, TokenExpiredError } from './nemlig/client.js';
 import { getBasket } from './nemlig/commands.js';
-import type { LoginFn } from './nemlig/login.js';
-import type { Basket } from './nemlig/types.js';
+import { refreshSession, type LoginFn } from './nemlig/login.js';
+import type { Basket, NemligToken } from './nemlig/types.js';
 import { hashAccount, newSessionId, SessionStore } from './store.js';
 
 export class UnknownSessionError extends Error {
@@ -12,9 +12,13 @@ export class UnknownSessionError extends Error {
   }
 }
 
+export type RefreshFn = (token: NemligToken) => Promise<NemligToken>;
+
 export interface SessionManagerOptions {
   store: SessionStore;
   login: LoginFn;
+  /** Mints a fresh token from stored cookies. Injectable so tests need no network. */
+  refresh?: RefreshFn;
   ttlMs: number;
   /** Cap on browsers running at once; a login is by far the heaviest thing here. */
   maxConcurrentLogins?: number;
@@ -27,6 +31,7 @@ export interface SessionManagerOptions {
 export class SessionManager {
   private readonly store: SessionStore;
   private readonly login: LoginFn;
+  private readonly refresh: RefreshFn;
   private readonly ttlMs: number;
   private readonly loginQueue: LoginQueue;
 
@@ -38,6 +43,7 @@ export class SessionManager {
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
     this.login = options.login;
+    this.refresh = options.refresh ?? refreshSession;
     this.ttlMs = options.ttlMs;
     this.loginQueue = new LoginQueue(options.maxConcurrentLogins ?? 1);
   }
@@ -132,12 +138,30 @@ export class SessionManager {
     return this.authenticate(sessionId, credentials);
   }
 
+  /**
+   * A new token, as cheaply as the situation allows. The JWT is a service-account
+   * credential the site hands out on request; the customer is identified by the
+   * cookies, which last a year. So an expiring token is one GET, and only a lapsed
+   * or missing cookie jar costs a browser launch.
+   */
+  private async mintToken(sessionId: string, credentials: NemligCredentials): Promise<NemligToken> {
+    const stored = this.store.get(sessionId);
+    if (stored?.token.cookieHeader) {
+      try {
+        return await this.refresh(stored.token);
+      } catch (error) {
+        // Falling back is the point: cookies do expire, and the browser still works.
+        console.warn(`[session ${sessionId}] refresh failed, logging in again: ${(error as Error).message}`);
+      }
+    }
+    return this.loginQueue.run(() => this.login(credentials));
+  }
+
   private authenticate(sessionId: string, credentials: NemligCredentials): Promise<NemligClient> {
     const inFlight = this.pendingLogins.get(sessionId);
     if (inFlight) return inFlight;
 
-    const attempt = this.loginQueue
-      .run(() => this.login(credentials))
+    const attempt = this.mintToken(sessionId, credentials)
       .then(async (token) => {
         const existing = this.store.get(sessionId);
         await this.store.put({

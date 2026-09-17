@@ -80,6 +80,32 @@ export interface AddToBasketResult {
   quantity: number;
 }
 
+export interface BasketQuantityResult {
+  productId: string;
+  name: string;
+  /** What the line held before this call. */
+  was: number;
+  /** What it holds now. Zero means the line is gone. */
+  quantity: number;
+}
+
+/**
+ * Sets a line to an exact quantity, which is the shape of the underlying endpoint
+ * and therefore the honest primitive: zero removes the line, and add/remove are
+ * conveniences expressed in terms of this.
+ */
+export async function setBasketQuantity(
+  client: NemligClient,
+  productId: string,
+  quantity: number,
+): Promise<BasketQuantityResult> {
+  const line = await basketLineFor(client, productId);
+  const was = line?.Quantity ?? 0;
+  const target = Math.max(0, quantity);
+  if (target !== was) await postQuantity(client, productId, target);
+  return { productId, name: line?.Name ?? line?.ProductName ?? productId, was, quantity: target };
+}
+
 /**
  * Despite its name, AddToBasket SETS a line's quantity rather than incrementing it:
  * posting 3 makes the line 3 however many were there before, and anything at or
@@ -89,7 +115,7 @@ export interface AddToBasketResult {
  * Everything that writes goes through here, and every caller reads the current
  * quantity first so it can compute the absolute value it wants.
  */
-async function setBasketQuantity(client: NemligClient, productId: string, quantity: number): Promise<void> {
+async function postQuantity(client: NemligClient, productId: string, quantity: number): Promise<void> {
   const response = await client.post(`${webBaseUrl}/webapi/basket/AddToBasket`, {
     AffectPartialQuantity: false,
     ProductId: productId,
@@ -113,13 +139,12 @@ async function basketLineFor(client: NemligClient, productId: string) {
   return (basket.Lines ?? []).find((line) => (line.Id ?? line.ProductId) === productId);
 }
 
+/** "Add 2 more" — read what is there, set that plus two. */
 export async function addToBasket(client: NemligClient, productId: string, quantity: number): Promise<AddToBasketResult> {
-  // Read first: "add 2" has to become "set to whatever is there plus 2".
   const line = await basketLineFor(client, productId);
   const before = line?.Quantity ?? 0;
-  const total = before + quantity;
-  await setBasketQuantity(client, productId, total);
-  return { productId, added: quantity, quantity: total };
+  const result = await setBasketQuantity(client, productId, before + quantity);
+  return { productId, added: quantity, quantity: result.quantity };
 }
 
 export interface RemoveFromBasketResult {
@@ -147,13 +172,13 @@ export async function removeFromBasket(
   const before = line.Quantity ?? 0;
   // Omitting the quantity means "take the whole line out".
   const remaining = quantity === undefined ? 0 : Math.max(0, before - quantity);
-  await setBasketQuantity(client, productId, remaining);
+  const result = await setBasketQuantity(client, productId, remaining);
 
   return {
     productId,
-    name: line.Name ?? line.ProductName ?? productId,
-    removed: before - remaining,
-    remaining,
+    name: result.name,
+    removed: before - result.quantity,
+    remaining: result.quantity,
   };
 }
 

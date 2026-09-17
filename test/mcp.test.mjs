@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createFakeLogin, startFakeNemlig } from './fake-nemlig.mjs';
+import { createFakeLogin, createFakeRefresh, startFakeNemlig } from './fake-nemlig.mjs';
 
 /** Tool results are JSON in a text block; unwrap that once here. */
 function payload(result) {
@@ -16,6 +16,7 @@ function payload(result) {
 describe('nemlig-mcp over streamable HTTP', () => {
   let nemlig;
   let login;
+  let refresh;
   let app;
   let sessions;
   let dataDir;
@@ -38,7 +39,8 @@ describe('nemlig-mcp over streamable HTTP', () => {
     const { createHttpServer } = await import('../dist/src/server.js');
 
     login = createFakeLogin(nemlig);
-    sessions = new SessionManager({ store: await SessionStore.open(dataDir), login, ttlMs: 60_000 });
+    refresh = createFakeRefresh(nemlig, login);
+    sessions = new SessionManager({ store: await SessionStore.open(dataDir), login, refresh, ttlMs: 60_000 });
     app = createHttpServer(sessions);
     await app.listen({ host: '127.0.0.1', port: 0 });
     endpoint = new URL('/mcp', `http://127.0.0.1:${app.server.address().port}`);
@@ -68,6 +70,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
       'new_session',
       'remove_from_basket',
       'search_products',
+      'set_basket_quantity',
     ]);
     await client.close();
   });
@@ -165,6 +168,45 @@ describe('nemlig-mcp over streamable HTTP', () => {
     await client.close();
   });
 
+  it('sets a line to an exact quantity, and clears it at zero', async () => {
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+    const qty = async () => {
+      const basket = payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } })).basket;
+      return basket.Lines.find((l) => l.Id === '700020')?.Quantity ?? 0;
+    };
+
+    const set3 = payload(
+      await client.callTool({ name: 'set_basket_quantity', arguments: { sessionId, productId: '700020', quantity: 3 } }),
+    );
+    assert.deepEqual({ was: set3.line.was, quantity: set3.line.quantity }, { was: 0, quantity: 3 });
+    assert.equal(await qty(), 3);
+
+    // Setting is absolute, so asking for 1 when there are 3 means one, not four.
+    const set1 = payload(
+      await client.callTool({ name: 'set_basket_quantity', arguments: { sessionId, productId: '700020', quantity: 1 } }),
+    );
+    assert.deepEqual({ was: set1.line.was, quantity: set1.line.quantity }, { was: 3, quantity: 1 });
+    assert.equal(await qty(), 1);
+
+    payload(
+      await client.callTool({ name: 'set_basket_quantity', arguments: { sessionId, productId: '700020', quantity: 0 } }),
+    );
+    assert.equal(await qty(), 0, 'zero clears the line');
+    await client.close();
+  });
+
+  it('skips the write when the quantity already matches', async () => {
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+    await client.callTool({ name: 'set_basket_quantity', arguments: { sessionId, productId: '700021', quantity: 2 } });
+    const before = nemlig.pathsHit('/webapi/basket/AddToBasket').length;
+
+    await client.callTool({ name: 'set_basket_quantity', arguments: { sessionId, productId: '700021', quantity: 2 } });
+    assert.equal(nemlig.pathsHit('/webapi/basket/AddToBasket').length, before, 'a no-op set should not write');
+    await client.close();
+  });
+
   it('adds cumulatively, even though the endpoint underneath sets an absolute quantity', async () => {
     // Nemlig's AddToBasket assigns the quantity rather than incrementing it, so
     // calling add(1) twice used to leave one item. Read-then-set fixes that.
@@ -255,18 +297,20 @@ describe('nemlig-mcp over streamable HTTP', () => {
     await client.close();
   });
 
-  it('logs in again and retries when the token expires mid-session', async () => {
+  it('re-authenticates and retries when Nemlig rejects the token mid-call', async () => {
     const client = await connect();
     const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
-    const before = login.count;
+    const logins = login.count;
+    const refreshes = refresh.count;
 
     nemlig.expireTokens();
     const result = payload(
       await client.callTool({ name: 'search_products', arguments: { sessionId, searchterm: 'agurk' } }),
     );
 
-    assert.equal(login.count, before + 1, 'expiry should cost exactly one new login');
-    assert.equal(result.products.length, 1, 'the call should succeed on the retry, not surface the 401');
+    assert.equal(refresh.count, refreshes + 1, 'a rejected token is replaced from cookies');
+    assert.equal(login.count, logins, 'which costs no browser launch');
+    assert.equal(result.products.length, 1, 'and the call succeeds on the retry rather than surfacing the 401');
     await client.close();
   });
 
@@ -278,11 +322,11 @@ describe('nemlig-mcp over streamable HTTP', () => {
     login.lifetimeMs = 10_000; // inside the refresh margin, so already due
     try {
       const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
-      const before = login.count;
+      const before = refresh.count;
 
       payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } }));
 
-      assert.equal(login.count, before + 1, 'a token inside the refresh margin must be replaced up front');
+      assert.equal(refresh.count, before + 1, 'a token inside the refresh margin must be replaced up front');
     } finally {
       login.lifetimeMs = 5 * 60 * 1000;
       await client.close();
@@ -298,6 +342,45 @@ describe('nemlig-mcp over streamable HTTP', () => {
       assert.match(result.content[0].text, /discovered-group-id/, 'the error should name the group id it used');
     } finally {
       nemlig.staleFavourites(false);
+      await client.close();
+    }
+  });
+
+  it('refreshes an expired token from cookies, without launching a browser', async () => {
+    // The JWT is a service-account credential; the cookies identify the customer
+    // and last a year. So expiry should cost one GET, not a Chromium launch.
+    const client = await connect();
+    login.lifetimeMs = 10_000;
+    try {
+      const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+      const logins = login.count;
+      const refreshes = refresh.count;
+
+      payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } }));
+
+      assert.equal(refresh.count, refreshes + 1, 'expiry should refresh');
+      assert.equal(login.count, logins, 'and must not launch a browser');
+    } finally {
+      login.lifetimeMs = 5 * 60 * 1000;
+      await client.close();
+    }
+  });
+
+  it('falls back to a browser login when the cookies have lapsed', async () => {
+    const client = await connect();
+    login.lifetimeMs = 10_000;
+    refresh.cookiesExpired = true;
+    try {
+      const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+      const logins = login.count;
+
+      const result = payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } }));
+
+      assert.equal(login.count, logins + 1, 'a failed refresh must fall back to logging in');
+      assert.equal(result.sessionId, sessionId, 'and the session id survives');
+    } finally {
+      refresh.cookiesExpired = false;
+      login.lifetimeMs = 5 * 60 * 1000;
       await client.close();
     }
   });

@@ -8,6 +8,7 @@ import {
   getFavouritesOnOffer,
   removeFromBasket,
   searchProducts,
+  setBasketQuantity,
 } from './nemlig/commands.js';
 import type { SessionManager } from './sessions.js';
 
@@ -22,7 +23,10 @@ export const INSTRUCTIONS = [
   'recent session, or starts one — call new_session only for a deliberately fresh context.',
   '',
   'Typical flow: get_favourite_products to see what the household usually buys, search_products',
-  'to find anything else, then add_to_basket with the product id. Prices are in DKK.',
+  'to find anything else, then set_basket_quantity with the product id. Prices are in DKK.',
+  '',
+  'The basket works in absolute quantities: set_basket_quantity is the primitive, and 0 clears',
+  'a line. add_to_basket and remove_from_basket are conveniences that read the line first.',
 ].join('\n');
 
 const sessionIdSchema = z
@@ -127,6 +131,29 @@ export function createMcpServer(sessions: SessionManager, credentials: NemligCre
         return getFavouritesOnOffer(client, basket);
       });
       return json({ sessionId: id, products });
+    },
+  );
+
+  server.registerTool(
+    'set_basket_quantity',
+    {
+      title: 'Set how many of a product the basket holds',
+      description:
+        'Sets a basket line to an exact quantity — 2 means the basket ends up with two, however many it had before. Quantity 0 removes the line. This mirrors how the Nemlig basket itself works and is the one to reach for when you know the number you want; add_to_basket and remove_from_basket are conveniences on top of it.',
+      inputSchema: {
+        sessionId: sessionIdSchema,
+        productId: z.string().min(1).describe('The product id to set.'),
+        quantity: z.number().int().min(0).describe('How many the basket should end up with. 0 removes the line.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ sessionId, productId, quantity }) => {
+      const id = await sessions.resolve(sessionId, credentials);
+      const result = await sessions.withClient(id, credentials, (client) =>
+        setBasketQuantity(client, productId, quantity),
+      );
+      sessions.invalidateBasket(id);
+      return json({ sessionId: id, line: result });
     },
   );
 

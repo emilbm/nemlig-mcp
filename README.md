@@ -34,6 +34,13 @@ gets the same silent anonymous treatment: `200`, empty basket, nothing wrong on
 the wire. Waiting for a `401` would never fire, so expiry is read from the JWT's
 own `exp` and the token is replaced before the call goes out.
 
+**Refreshing needs no browser.** The JWT is a *service-account* credential —
+`preferred_username` is `service-account-sitecore`, and the `/webapi/Token`
+endpoint hands one out to anyone. The account is identified by a cookie, not the
+token: `.ASPXAUTH`, an ordinary forms-auth ticket good for a year. So an expiring
+token costs one GET carrying the stored cookies, and only a lapsed cookie jar
+falls back to a Chromium launch. Measured: ~280 ms versus ~6–10 s.
+
 ```
 MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig web API (fetch + JWT)
                                      │
@@ -49,7 +56,8 @@ MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig w
 | `search_products` | Searches the catalogue (Danish terms) for a product id. |
 | `get_favourite_products` | The account's frequently bought products. |
 | `get_favourites_on_offer` | Those of them currently on promotion, with the offer described. |
-| `add_to_basket` | Adds a product id to the basket, on top of whatever is already there. |
+| `set_basket_quantity` | Sets a line to an exact quantity; 0 removes it. The primitive. |
+| `add_to_basket` | Adds on top of whatever is already there. |
 | `remove_from_basket` | Takes items back out; omit the quantity to clear the line. |
 | `end_session` | Forgets a session and its stored token. |
 
@@ -162,14 +170,14 @@ options are `NEMLIG_HEADLESS=false` with an X server in the container, or runnin
 the login on a machine that has a display. It has not been a problem so far, but
 it is the assumption most likely to break.
 
-### The five-minute re-login
+### The session file is a credential
 
-Because tokens expire in five minutes and there is no refresh flow implemented,
-a shopping session longer than that pays for a fresh headless browser login every
-few minutes — roughly five to ten seconds each time, invisible but not free. The
-token response may well carry a `refresh_token` that would avoid relaunching a
-browser at all; the original prototype discarded it and so does this, so nobody
-has looked. That is the obvious next improvement.
+`/data/sessions.json` stores each session's `.ASPXAUTH` cookie, which is a
+year-long authenticator for the account — functionally as sensitive as the
+password. It is written `0600`, but treat the data volume accordingly: anyone who
+can read that file can act as the account until the cookie expires or the password
+changes. This is also why credentials themselves are never written: only the
+resulting cookie is, filed under a hash of the username.
 
 ## Upgrading Playwright
 

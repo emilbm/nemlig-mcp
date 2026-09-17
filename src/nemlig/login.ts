@@ -205,3 +205,69 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
     );
   });
 }
+
+/**
+ * Mints a fresh token without a browser.
+ *
+ * The JWT turns out to be a service-account credential — `preferred_username` is
+ * `service-account-sitecore`, and the endpoint hands one out to anyone who asks.
+ * The customer is identified by the cookies instead, and `.ASPXAUTH` is good for a
+ * year. So a five-minute expiry costs one GET, not a Chromium launch.
+ *
+ * The cookies are still sent, and the result is verified against the same page the
+ * login uses: if `.ASPXAUTH` has lapsed we would otherwise slide back into the
+ * silent-anonymous state that made the original bug so hard to see.
+ */
+export async function refreshSession(token: NemligToken): Promise<NemligToken> {
+  const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/Token`, {
+    headers: { Cookie: token.cookieHeader, Accept: 'application/json', 'User-Agent': config.nemlig.userAgent },
+  });
+  if (!response.ok) throw new LoginError(`Token refresh failed: ${response.status} ${response.statusText}`);
+
+  const body = (await response.json()) as { access_token?: string };
+  if (!body.access_token) throw new LoginError('Token refresh returned no access_token');
+
+  // Prove the cookies still identify the account, and pick up any republished ids
+  // from the same request while we are here.
+  const probe = await fetch(`${config.nemlig.webBaseUrl}${config.nemlig.sessionProbePath}`, {
+    headers: {
+      Authorization: `Bearer ${body.access_token}`,
+      Cookie: token.cookieHeader,
+      Accept: 'application/json',
+      'User-Agent': config.nemlig.userAgent,
+    },
+  });
+  if (!probe.ok) throw new LoginError(`Token refresh could not verify the session: HTTP ${probe.status}`);
+
+  const page = (await probe.json()) as { Settings?: PageSettings; content?: unknown };
+  const settings = page.Settings;
+  if (!settings?.UserId) {
+    throw new LoginError('Refreshed token but the cookies no longer identify the account — a new login is needed.');
+  }
+
+  const spots: PageSpot[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    if (typeof record['ProductGroupId'] === 'string') {
+      spots.push({
+        heading: typeof record['Heading'] === 'string' ? record['Heading'] : '',
+        productGroupId: record['ProductGroupId'],
+        totalProducts: typeof record['TotalProducts'] === 'number' ? record['TotalProducts'] : 0,
+      });
+    }
+    Object.values(record).forEach(walk);
+  };
+  walk(page.content);
+
+  return {
+    accessToken: body.access_token,
+    cookieHeader: token.cookieHeader,
+    acquiredAt: Date.now(),
+    expiresAt: expiryOf(body.access_token),
+    userId: settings.UserId,
+    buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
+    favouritesGroupId: spots.length ? pickFavouritesGroup(spots) : token.favouritesGroupId,
+  };
+}

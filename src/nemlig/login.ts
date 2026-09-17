@@ -1,14 +1,13 @@
-import type { Browser, Page } from 'playwright';
+import type { Browser } from 'playwright';
 import { config, type NemligCredentials } from '../config.js';
-import type { NemligToken, PageSettings, PageSpot } from './types.js';
+import type { NemligToken } from './types.js';
 
 /**
  * Logging in is the one thing we cannot do with plain HTTP: Nemlig's login is a
- * JavaScript form that ends in a token request. So we drive a real browser,
- * listen for that request, and keep both the JWT and the cookies it set.
+ * JavaScript form that ends in a token request. So we drive a real browser to
+ * submit it, keep the cookies it sets, and from then on everything is fetch.
  *
- * This is deliberately the only Playwright in the codebase — everything after
- * login is ordinary fetch.
+ * This is deliberately the only Playwright in the codebase.
  */
 export type LoginFn = (credentials: NemligCredentials) => Promise<NemligToken>;
 
@@ -34,75 +33,50 @@ export const playwrightLogin: LoginFn = async (credentials) => {
     const context = await browser.newContext({ userAgent: config.nemlig.userAgent, locale: 'da-DK' });
     const page = await context.newPage();
 
-    // Arm the listener before navigating: the token response can arrive as soon
-    // as the form is submitted.
-    let resolveToken!: (value: string) => void;
+    // Arm the listener before navigating: a wrong password fails here, and this is
+    // the cheapest place to turn it into a clear error.
     let rejectToken!: (reason: Error) => void;
-    const interceptedToken = new Promise<string>((resolve, reject) => {
-      resolveToken = resolve;
+    const loginFormPosted = new Promise<void>((resolve, reject) => {
       rejectToken = reject;
-    });
-
-    page.on('response', (response) => {
-      if (response.url() !== TOKEN_URL) return;
-      void response
-        .text()
-        .then((body) => {
-          const parsed = JSON.parse(body) as { access_token?: string; error_description?: string };
-          if (parsed.access_token) resolveToken(parsed.access_token);
-          else rejectToken(new LoginError(parsed.error_description ?? 'Nemlig returned no access_token'));
-        })
-        .catch((cause: unknown) => rejectToken(new LoginError('Could not read the token response', { cause })));
+      page.on('response', (response) => {
+        if (response.url() !== TOKEN_URL) return;
+        void response
+          .text()
+          .then((body) => {
+            const parsed = JSON.parse(body) as { access_token?: string; error_description?: string };
+            if (parsed.access_token) resolve();
+            else reject(new LoginError(parsed.error_description ?? 'Nemlig rejected the login'));
+          })
+          .catch((cause: unknown) => reject(new LoginError('Could not read the login response', { cause })));
+      });
     });
 
     await page.goto(`${config.nemlig.webBaseUrl}/login`, { waitUntil: 'domcontentloaded' });
 
-    // The consent banner covers the form. It may already be dismissed by a
-    // stored preference, so a failure here is not fatal.
+    // The consent banner covers the form. It may already be dismissed by a stored
+    // preference, so a failure here is not fatal.
     await page.evaluate('CookieInformation.submitAllCategories()').catch(() => undefined);
 
     await page.fill("[name='userEmail']", credentials.username);
     await page.fill("[name='userPassword']", credentials.password);
     await page.click("button[type='submit']");
 
-    // Awaited only to confirm the form succeeded and to surface a bad-credentials
-    // error: this intercepted token is the pre-auth one, minted before .ASPXAUTH
-    // exists and so missing the customer's debitorId. The token we keep is fetched
-    // fresh below, once the authenticated session is established.
     await withTimeout(
-      interceptedToken,
+      loginFormPosted,
       config.login.timeoutMs,
-      'Timed out waiting for Nemlig to return a token — the credentials may be wrong, or the login page may have changed',
+      'Timed out submitting the Nemlig login — the credentials may be wrong, or the login page may have changed',
     );
 
     /*
-     * The token arriving does NOT mean we are logged in to the website. Nemlig
-     * issues the JWT first and only then finishes establishing the Sitecore
-     * session that account-scoped endpoints actually read. Snapshot the cookies
-     * in between and you get a token that authenticates while the basket and
-     * favourites quietly come back anonymous and empty.
-     *
-     * So we wait for the site itself to admit who we are: poll a page until its
-     * Settings block carries a UserId. That is the real post-condition of login.
+     * A token by itself does not mean we are logged in: Nemlig hands out a bare
+     * service-account token to anyone, and only stamps it with the customer's
+     * debitorId once the .ASPXAUTH cookie is established. That cookie lands a beat
+     * after the form posts, so poll — re-reading the jar and re-minting the token —
+     * until the token carries a debitorId. That claim is the real post-condition of
+     * login, and the exact thing the productbff needs.
      */
-    const { settings, spots } = await waitForAuthenticatedSession(page);
-
-    // Only now are the cookies worth keeping — and only now does /webapi/Token
-    // return a token carrying the customer's debitorId, because .ASPXAUTH is set.
-    const cookies = await context.cookies();
-    const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
-    const accessToken = await fetchToken(cookieHeader);
-
-    return {
-      accessToken,
-      cookieHeader,
-      acquiredAt: Date.now(),
-      expiresAt: expiryOf(accessToken),
-      userId: settings.UserId!,
-      debitorId: debitorIdOf(accessToken),
-      buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
-      favouritesGroupId: pickFavouritesGroup(spots),
-    };
+    const authed = await waitForCustomerToken(() => context.cookies());
+    return authed;
   } catch (error) {
     if (error instanceof LoginError) throw error;
     throw new LoginError(`Nemlig login failed: ${(error as Error).message}`, { cause: error });
@@ -111,97 +85,71 @@ export const playwrightLogin: LoginFn = async (credentials) => {
   }
 };
 
+type Cookie = { name: string; value: string };
+
 /**
- * Polls a Sitecore page from inside the browser until it reports a UserId.
- * Fetching in the page context means the browser's own cookie jar is used, so
- * this measures exactly what a later fetch from Node will be able to reproduce.
+ * Polls the token endpoint with the browser's current cookies until the token
+ * comes back carrying a debitorId — i.e. until `.ASPXAUTH` has taken effect.
  */
-async function waitForAuthenticatedSession(page: Page): Promise<{ settings: PageSettings; spots: PageSpot[] }> {
+async function waitForCustomerToken(readCookies: () => Promise<Cookie[]>): Promise<NemligToken> {
   const deadline = Date.now() + config.login.sessionTimeoutMs;
-  let last: PageSettings | null = null;
+  let lastDebitor: string | null = null;
 
   while (Date.now() < deadline) {
-    const probe = await page
-      .evaluate(
-        async (path) => {
-          const response = await fetch(path, { headers: { Accept: 'application/json' } });
-          if (!response.ok) return null;
-          const body = (await response.json()) as { Settings?: unknown; content?: unknown };
-
-          // The page nests its spots in ribbons of varying depth, so walk the whole
-          // thing rather than assuming a shape that a redesign would change.
-          const spots: Array<{ heading: string; productGroupId: string; totalProducts: number }> = [];
-          const walk = (node: unknown): void => {
-            if (Array.isArray(node)) return node.forEach(walk);
-            if (!node || typeof node !== 'object') return;
-            const record = node as Record<string, unknown>;
-            if (typeof record['ProductGroupId'] === 'string') {
-              spots.push({
-                heading: typeof record['Heading'] === 'string' ? record['Heading'] : '',
-                productGroupId: record['ProductGroupId'],
-                totalProducts: typeof record['TotalProducts'] === 'number' ? record['TotalProducts'] : 0,
-              });
-            }
-            Object.values(record).forEach(walk);
-          };
-          walk(body.content);
-
-          return { settings: (body.Settings ?? null) as PageSettings | null, spots };
-        },
-        config.nemlig.sessionProbePath,
-      )
-      .catch(() => null);
-
-    if (probe?.settings?.UserId) return { settings: probe.settings, spots: probe.spots };
-    last = probe?.settings ?? last;
-    await page.waitForTimeout(500);
+    const cookieHeader = (await readCookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+    if (/(^|;\s*)\.ASPXAUTH=/.test(cookieHeader)) {
+      const token = await buildToken(cookieHeader);
+      if (token.debitorId) return token;
+      lastDebitor = token.debitorId;
+    }
+    await sleep(500);
   }
 
   throw new LoginError(
-    'Nemlig issued a token but the website session stayed anonymous (Settings.UserId was null). ' +
-      'Account-scoped calls would silently return nothing, so the login is being treated as failed. ' +
-      `Last seen: ${JSON.stringify(last ?? 'no readable Settings')}`,
+    'Login completed but the session stayed anonymous (no debitorId on the token). ' +
+      'Account-scoped calls would silently return nothing, so this is treated as a failed login. ' +
+      `Last debitorId seen: ${JSON.stringify(lastDebitor)}`,
   );
 }
 
 /**
- * Picks the favourites list out of the spots on the page. Matched on its heading
- * rather than its id, because the id is exactly the thing that changes; an explicit
- * id override stays available for when the Danish copy changes instead.
- */
-export function pickFavouritesGroup(spots: PageSpot[]): string {
-  const override = config.nemlig.favouritesProductGroupId;
-  if (override) return override;
-
-  const match = spots.find((spot) => config.nemlig.favouritesHeadingPattern.test(spot.heading));
-  if (match) return match.productGroupId;
-
-  throw new LoginError(
-    `Could not find the favourites list on ${config.nemlig.sessionProbePath}: no spot's heading matched ` +
-      `${config.nemlig.favouritesHeadingPattern}. Found ${
-        spots.length ? spots.map((s) => `"${s.heading}" (${s.productGroupId}, ${s.totalProducts})`).join('; ') : 'no spots at all'
-      }. Set NEMLIG_FAVOURITES_GROUP_ID to pin it, or NEMLIG_FAVOURITES_HEADING to match the new wording.`,
-  );
-}
-
-/**
- * GETs a token from `/webapi/Token` with the given cookies.
+ * GETs a token from `/webapi/Token` with the given cookies and packages it.
  *
- * The cookies matter for more than identity: when `.ASPXAUTH` is present the
- * endpoint enriches the token with the customer's `debitorId`, and the new
- * `productbff` API resolves favourites from exactly that claim. Without cookies —
- * or when captured mid-login before `.ASPXAUTH` is set — the token is a bare
- * service-account credential with no customer, which is why an early version of
- * this login could not read favourites from the bff.
+ * The cookies do more than authenticate the request: when `.ASPXAUTH` is present
+ * the endpoint enriches the token with the customer's `debitorId`, which the
+ * productbff API resolves favourites from. Without it the token is a bare
+ * service-account credential the bff treats as anonymous.
  */
-export async function fetchToken(cookieHeader: string): Promise<string> {
+export async function buildToken(cookieHeader: string): Promise<NemligToken> {
   const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/Token`, {
     headers: { Cookie: cookieHeader, Accept: 'application/json', 'User-Agent': config.nemlig.userAgent },
   });
   if (!response.ok) throw new LoginError(`Token request failed: ${response.status} ${response.statusText}`);
+
   const body = (await response.json()) as { access_token?: string };
   if (!body.access_token) throw new LoginError('Token request returned no access_token');
-  return body.access_token;
+
+  return {
+    accessToken: body.access_token,
+    cookieHeader,
+    acquiredAt: Date.now(),
+    expiresAt: expiryOf(body.access_token),
+    debitorId: debitorIdOf(body.access_token),
+  };
+}
+
+/**
+ * Mints a fresh token without a browser. The token is a five-minute service-account
+ * credential; the customer lives in `.ASPXAUTH`, which is good for a year. So an
+ * expiry costs one GET, not a Chromium launch — and a token that comes back without
+ * a debitorId means the cookie has finally lapsed and a real login is due.
+ */
+export async function refreshSession(token: NemligToken): Promise<NemligToken> {
+  const refreshed = await buildToken(token.cookieHeader);
+  if (!refreshed.debitorId) {
+    throw new LoginError('Refreshed token but the cookies no longer identify the account — a new login is needed.');
+  }
+  return refreshed;
 }
 
 /** Reads the customer id the bff needs out of the token, or null on a service-account token. */
@@ -229,6 +177,10 @@ export function expiryOf(jwt: string): number {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new LoginError(message)), ms);
@@ -243,65 +195,4 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
       },
     );
   });
-}
-
-/**
- * Mints a fresh token without a browser.
- *
- * The JWT turns out to be a service-account credential — `preferred_username` is
- * `service-account-sitecore`, and the endpoint hands one out to anyone who asks.
- * The customer is identified by the cookies instead, and `.ASPXAUTH` is good for a
- * year. So a five-minute expiry costs one GET, not a Chromium launch.
- *
- * The cookies are still sent, and the result is verified against the same page the
- * login uses: if `.ASPXAUTH` has lapsed we would otherwise slide back into the
- * silent-anonymous state that made the original bug so hard to see.
- */
-export async function refreshSession(token: NemligToken): Promise<NemligToken> {
-  const accessToken = await fetchToken(token.cookieHeader);
-
-  // Prove the cookies still identify the account, and pick up any republished ids
-  // from the same request while we are here.
-  const probe = await fetch(`${config.nemlig.webBaseUrl}${config.nemlig.sessionProbePath}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Cookie: token.cookieHeader,
-      Accept: 'application/json',
-      'User-Agent': config.nemlig.userAgent,
-    },
-  });
-  if (!probe.ok) throw new LoginError(`Token refresh could not verify the session: HTTP ${probe.status}`);
-
-  const page = (await probe.json()) as { Settings?: PageSettings; content?: unknown };
-  const settings = page.Settings;
-  if (!settings?.UserId) {
-    throw new LoginError('Refreshed token but the cookies no longer identify the account — a new login is needed.');
-  }
-
-  const spots: PageSpot[] = [];
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) return node.forEach(walk);
-    if (!node || typeof node !== 'object') return;
-    const record = node as Record<string, unknown>;
-    if (typeof record['ProductGroupId'] === 'string') {
-      spots.push({
-        heading: typeof record['Heading'] === 'string' ? record['Heading'] : '',
-        productGroupId: record['ProductGroupId'],
-        totalProducts: typeof record['TotalProducts'] === 'number' ? record['TotalProducts'] : 0,
-      });
-    }
-    Object.values(record).forEach(walk);
-  };
-  walk(page.content);
-
-  return {
-    accessToken,
-    cookieHeader: token.cookieHeader,
-    acquiredAt: Date.now(),
-    expiresAt: expiryOf(accessToken),
-    userId: settings.UserId,
-    debitorId: debitorIdOf(accessToken),
-    buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
-    favouritesGroupId: spots.length ? pickFavouritesGroup(spots) : token.favouritesGroupId,
-  };
 }

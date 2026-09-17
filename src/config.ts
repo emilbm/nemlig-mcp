@@ -67,17 +67,9 @@ export const config = {
   nemlig: {
     webBaseUrl: str('NEMLIG_WEB_BASE_URL', 'https://www.nemlig.com'),
     searchBaseUrl: str('NEMLIG_SEARCH_BASE_URL', 'https://webapi.prod.knl.nemlig.it'),
-    /** Page read at login to learn the customer id and the cache-busting build stamp. */
-    sessionProbePath: str('NEMLIG_SESSION_PROBE_PATH', '/favoritter/anbefalet-til-dig?GetAsJson=1'),
-    /**
-     * The favourites list is found by its heading rather than pinned by id, because
-     * the id is what Nemlig changes on a republish. Today's heading is
-     * "Har du husket dine favoritter?"; the pattern only has to be distinctive
-     * enough to tell it from the recommendation lists beside it on the page.
-     */
-    favouritesHeadingPattern: new RegExp(str('NEMLIG_FAVOURITES_HEADING', 'favoritter'), 'i'),
-    /** Escape hatch: pin the id explicitly and skip discovery, if the copy changes. */
-    favouritesProductGroupId: str('NEMLIG_FAVOURITES_GROUP_ID', ''),
+    /** Nemlig's customer-aware backend-for-frontend, where favourites now come from. */
+    bffBaseUrl: str('NEMLIG_BFF_BASE_URL', 'https://webapi.prod.knl.nemlig.it'),
+    bffFavouritesPath: str('NEMLIG_BFF_FAVOURITES_PATH', '/favoritter'),
     searchPageSize: int('NEMLIG_SEARCH_PAGE_SIZE', 20),
     userAgent: str(
       'NEMLIG_USER_AGENT',

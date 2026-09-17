@@ -21,14 +21,14 @@ working across a restart even though the credential itself does not persist.
 
 Two things about that login are worth knowing, because both cost real debugging:
 
-**A token is not a session.** Nemlig issues the JWT *before* it finishes
-establishing the website session that account-scoped endpoints read. Snapshot the
-cookies in between and you get a token that authenticates while the basket and
-favourites come back empty — as an anonymous visitor, with no error. So login is
-not considered done until a page reports a `Settings.UserId`. That check also
-yields everything else that used to be hardcoded — the customer id, the
-cache-busting build stamp, and the favourites list id — from the one request we
-were already making.
+**A token is not a session, and the token carries the customer.** The JWT is a
+service-account credential — anyone can fetch one — but when `/webapi/Token` is
+called with the `.ASPXAUTH` cookie it stamps the token with the customer's
+`debitorId`, and the `productbff` API resolves favourites from exactly that claim.
+The cookie lands a beat *after* the login form posts, so login polls the token
+endpoint until the token comes back carrying a `debitorId`. That claim is both the
+proof the session is really authenticated and the thing the bff needs; without it
+every account-scoped call comes back empty, as an anonymous visitor, with no error.
 
 **Tokens last five minutes, and expiry does not fail loudly.** An expired token
 gets the same silent anonymous treatment: `200`, empty basket, nothing wrong on
@@ -68,12 +68,14 @@ both need the basket's delivery slot to return real prices and stock, so the
 server fetches the basket once per session and caches it — `add_to_basket`
 invalidates that cache.
 
-`get_favourites_on_offer` is derived from the favourites list rather than from
-Nemlig's site-wide `/tilbud` page: that page is every offer in the shop and says
-nothing about whether this household buys the product. Each result carries an
-`offer` with a shelf-edge description ("3 for 15 kr", "40% off") plus the
-structured `minQuantity` / `offerPrice` / `savings`, because multi-buy offers only
-apply at their quantity — a single item is still full price.
+Favourites come from Nemlig's `productbff` API — the customer-aware backend the new
+site uses — which returns the whole favourites page. `get_favourite_products` is
+every favourite across its category sections, de-duplicated; `get_favourites_on_offer`
+is the "Favoritter på tilbud" section, Nemlig's own curation of which favourites are
+discounted. Each offer's `description` is Nemlig's shelf-edge wording verbatim, in
+Danish ("3 stk. 15,-", "Spar 40 procent"), alongside structured `minQuantity`,
+`offerPrice`, `savings` and `percent` for a caller that would rather compute than
+read. Multi-buy deals only reach their price at `minQuantity`.
 
 **`AddToBasket` sets, it does not add.** Posting `Quantity: 3` makes the line three
 however many were on it before, and anything at or below zero removes it — the name
@@ -100,8 +102,8 @@ a session started by one account is never handed to another.
 | `NEMLIG_REFRESH_MARGIN_MS` | `45000` | Re-authenticate this long before the five-minute token expires. |
 | `NEMLIG_SESSION_TTL_MS` | `604800000` (7 days) | Untouched sessions are pruned hourly. |
 | `NEMLIG_DATA_DIR` | `/data` | Where `sessions.json` lives. |
-| `NEMLIG_FAVOURITES_HEADING` | `favoritter` | Pattern matching the favourites list's heading on the probe page. |
-| `NEMLIG_FAVOURITES_GROUP_ID` | — | Pins the favourites list id and skips discovery. Escape hatch only. |
+| `NEMLIG_BFF_BASE_URL` | `https://webapi.prod.knl.nemlig.it` | Host of the productbff favourites API. |
+| `NEMLIG_BFF_FAVOURITES_PATH` | `/favoritter` | Page path the favourites are read from. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address. |
 
 `.env.example` has the rest.
@@ -154,13 +156,14 @@ the website changes. The two places that will go first:
 - **The login flow.** `src/nemlig/login.ts` fills `[name='userEmail']` and
   `[name='userPassword']` and waits for `POST /webapi/Token`. If Nemlig redesigns
   the login page, that is the file to fix.
-- **The favourites list's heading.** The list is found on the probe page by its
-  heading — "Har du husket dine favoritter?" — rather than by its Sitecore id,
-  because the id is the thing that changes on a republish. Discovery runs on every
-  login, so a new id heals itself within one token lifetime. If Nemlig rewrites the
-  Danish copy instead, login fails with the headings it actually found; set
-  `NEMLIG_FAVOURITES_HEADING` to match the new wording, or
-  `NEMLIG_FAVOURITES_GROUP_ID` to pin the id and skip discovery.
+- **The `debitorId` in the token.** Favourites only resolve because `/webapi/Token`,
+  called with `.ASPXAUTH`, embeds the customer's `debitorId`, which the bff reads.
+  Login treats a token without a `debitorId` as a failed login rather than pressing
+  on anonymously. If Nemlig stops enriching the token, favourites break loudly here
+  rather than silently returning nothing.
+- **The `productbff` favourites shape.** `src/nemlig/bff.ts` reads `pageContent`
+  sections of products with `price` (øre), `certificates`, `campaignLines` and
+  `campaignBadge`. A redesign of that response is what would break favourites next.
 
 ### Headless and bot checks
 

@@ -29,6 +29,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
     // config.ts reads the environment once, at import time.
     process.env.NEMLIG_WEB_BASE_URL = nemlig.baseUrl;
     process.env.NEMLIG_SEARCH_BASE_URL = nemlig.baseUrl;
+    process.env.NEMLIG_BFF_BASE_URL = nemlig.baseUrl;
     process.env.NEMLIG_DATA_DIR = dataDir;
     process.env.NEMLIG_USERNAME = 'shopper@example.com';
     process.env.NEMLIG_PASSWORD = 'hunter2';
@@ -114,41 +115,50 @@ describe('nemlig-mcp over streamable HTTP', () => {
     await client.close();
   });
 
-  it('fetches favourites with the referer Nemlig requires', async () => {
+  it('returns every favourite from the productbff, deduped across sections', async () => {
     const client = await connect();
     const result = payload(await client.callTool({ name: 'get_favourite_products', arguments: {} }));
-    assert.equal(result.products[0].name, 'Letmælk 1L');
-    assert.equal(result.products[0].deliverable, false);
 
-    const favourites = nemlig.state.requests
-      .filter((request) => request.path.endsWith('/Products/GetByProductGroupId'))
-      .at(-1);
-    assert.equal(favourites.headers.referer, `${nemlig.baseUrl}/favoritter/anbefalet-til-dig`);
+    // Hvidløg appears in both the on-offer and the category section; it should
+    // surface once, and the full-price Banan from the category section should be there.
+    const ids = result.products.map((p) => p.id).sort();
+    assert.deepEqual(ids, ['100160', '2301138', '5046029', '5069520']);
+
+    const banan = result.products.find((p) => p.id === '2301138');
+    assert.equal(banan.name, 'Banan');
+    assert.equal(banan.price, 2.5, 'øre are converted to kroner');
+    assert.equal(banan.offer, undefined, 'a full-price product carries no offer');
+
+    const soldOut = result.products.find((p) => p.id === '5069520');
+    assert.equal(soldOut.inStock, false, 'availability type SoldOut maps to out of stock');
+
+    // The request really went to the bff with the basket's timeslot.
+    const hit = nemlig.pathsHit('/productbff/api/web/page').at(-1);
+    assert.equal(hit.query.path, '/favoritter');
+    assert.equal(hit.query.timeslotId, 'slot-42');
     await client.close();
   });
 
-  it('returns only the favourites that are on offer, with the promotion described', async () => {
+  it('returns the on-offer favourites with the shelf-edge wording from Nemlig', async () => {
     const client = await connect();
-    const all = payload(await client.callTool({ name: 'get_favourite_products', arguments: {} }));
     const offers = payload(await client.callTool({ name: 'get_favourites_on_offer', arguments: {} }));
 
-    assert.equal(all.products.length, 5);
-    assert.equal(offers.products.length, 4, 'the full-price product must be filtered out');
-    assert.ok(
-      offers.products.every((product) => product.offer),
-      'every product returned must carry its offer',
-    );
+    assert.equal(offers.products.length, 3, 'the "Favoritter på tilbud" section, and only it');
+    assert.ok(offers.products.every((p) => p.offer), 'every product on the list carries its offer');
 
-    // One assertion per campaign shape Nemlig uses, so a format change is caught.
-    const described = Object.fromEntries(offers.products.map((p) => [p.name, p.offer.description]));
-    assert.equal(described['Hvidløg øko.'], '3 for 15 kr');
-    assert.equal(described['Farfalle'], '40% off — now 19,05 kr');
-    assert.equal(described['Kyllingebrystfilet'], 'Save 32,95 kr');
-    assert.equal(described['Serrano Reserva'], 'Mix 2 for 36 kr');
-
-    const garlic = offers.products.find((p) => p.name === 'Hvidløg øko.');
-    assert.equal(garlic.offer.minQuantity, 3, 'multi-buy offers must say how many are needed');
-    assert.equal(garlic.offer.offerPrice, 15);
+    const described = Object.fromEntries(offers.products.map((p) => [p.name, p.offer]));
+    // Multi-buy: the description is Nemlig's shelf text, with the quantity parsed out.
+    assert.equal(described['Hvidløg øko.'].description, '3 stk. 15,-');
+    assert.equal(described['Hvidløg øko.'].minQuantity, 3);
+    assert.equal(described['Hvidløg øko.'].offer, undefined);
+    // Percent discount: percent and the discounted unit price come through as numbers.
+    assert.equal(described['Farfalle'].description, 'Spar 40 procent');
+    assert.equal(described['Farfalle'].percent, 40);
+    assert.equal(described['Farfalle'].savings, 12.7);
+    assert.equal(described['Farfalle'].offerPrice, 19.05);
+    // Straight discount.
+    assert.equal(described['Kyllingebrystfilet'].description, 'Spar 32,95 kroner');
+    assert.equal(described['Kyllingebrystfilet'].savings, 32.95);
     await client.close();
   });
 
@@ -329,19 +339,6 @@ describe('nemlig-mcp over streamable HTTP', () => {
       assert.equal(refresh.count, before + 1, 'a token inside the refresh margin must be replaced up front');
     } finally {
       login.lifetimeMs = 5 * 60 * 1000;
-      await client.close();
-    }
-  });
-
-  it('reports a stale favourites group instead of returning an empty list', async () => {
-    const client = await connect();
-    nemlig.staleFavourites();
-    try {
-      const result = await client.callTool({ name: 'get_favourite_products', arguments: {} });
-      assert.equal(result.isError, true, 'an unparseable favourites response must not read as "no favourites"');
-      assert.match(result.content[0].text, /discovered-group-id/, 'the error should name the group id it used');
-    } finally {
-      nemlig.staleFavourites(false);
       await client.close();
     }
   });

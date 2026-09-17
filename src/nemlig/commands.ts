@@ -1,12 +1,6 @@
 import { config } from '../config.js';
 import { NemligApiError, NemligClient, readJson } from './client.js';
-import {
-  summarizeProduct,
-  type Basket,
-  type ProductList,
-  type ProductSummary,
-  type SearchResult,
-} from './types.js';
+import { summarizeProduct, type Basket, type ProductSummary, type SearchResult } from './types.js';
 
 const { webBaseUrl, searchBaseUrl, searchPageSize } = config.nemlig;
 
@@ -32,45 +26,9 @@ export async function searchProducts(client: NemligClient, basket: Basket, term:
   return (result.Products?.Products ?? []).map(summarizeProduct);
 }
 
-export async function getFavouriteProducts(client: NemligClient, basket: Basket): Promise<ProductSummary[]> {
-  const { userId, buildStamp, favouritesGroupId } = client.token;
-
-  // Both of these are read off the site at login rather than pinned: the customer
-  // id is whose list this is, and the stamp changes on every product reimport.
-  const url = new URL(
-    `/webapi/${buildStamp}/${basket.TimeslotUtc}/${basket.DeliveryZoneId}/${userId}/Products/GetByProductGroupId`,
-    webBaseUrl,
-  );
-  url.searchParams.set('productGroupId', favouritesGroupId);
-  url.searchParams.set('sortorder', 'default');
-
-  const response = await client.get(url.toString(), { Referer: `${webBaseUrl}/favoritter/anbefalet-til-dig` });
-  const result = await readJson<ProductList>(response, 'fetch favourite products');
-
-  // An unexpected shape here used to read as "no favourites", which is how a stale
-  // group id and an anonymous session both hid for as long as they did.
-  if (!Array.isArray(result.Products)) {
-    throw new NemligApiError(
-      `Favourites came back without a Products array (keys: ${Object.keys(result).join(', ')}). ` +
-        `Group id ${favouritesGroupId} was discovered from ${config.nemlig.sessionProbePath} at login, ` +
-        `so the page's shape has probably changed.`,
-      response.status,
-      '',
-    );
-  }
-  return result.Products.map(summarizeProduct);
-}
-
-/**
- * The household's favourites that are currently on promotion — Nemlig's own
- * "Favoritter på tilbud". Derived from the favourites list rather than from the
- * site-wide offers page, because /tilbud is every offer in the shop and says
- * nothing about whether this account buys the product.
- */
-export async function getFavouritesOnOffer(client: NemligClient, basket: Basket): Promise<ProductSummary[]> {
-  const favourites = await getFavouriteProducts(client, basket);
-  return favourites.filter((product) => product.offer);
-}
+// Favourites now come from the productbff API, which resolves the account from the
+// token's debitorId claim and returns the promotion text ready-made.
+export { getFavouriteProducts, getFavouritesOnOffer } from './bff.js';
 
 export interface AddToBasketResult {
   productId: string;

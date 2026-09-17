@@ -8,7 +8,6 @@ export async function startFakeNemlig() {
   const state = {
     /** Tokens this server still accepts. The fake login mints "token-1", "token-2", ... */
     validTokens: new Set(['token-1']),
-    favouritesStale: false,
     requests: [],
     basketLines: [],
   };
@@ -55,50 +54,68 @@ export async function startFakeNemlig() {
       });
     }
 
-    if (url.pathname.endsWith('/Products/GetByProductGroupId')) {
-      // A stale group id gets a 200 with no Products array, not a 404 — which is
-      // exactly how the real thing hid a broken favourites call as "none".
-      if (state.favouritesStale) return send(200, { Message: 'Unknown product group', products: null });
-      // Campaign shapes copied from real responses: one of each type Nemlig uses,
-      // plus a full-price product so the on-offer filter has something to exclude.
+    if (url.pathname === '/productbff/api/web/page') {
+      // Shapes copied from real productbff responses: prices in øre, promotions as
+      // campaignLines/campaignBadge, availability as a type. The first section is
+      // Nemlig's "Favoritter på tilbud" (on-offer favourites); a second section
+      // repeats a favourite by category and adds one full-price product, so the
+      // all-favourites union has something the on-offer list does not.
+      const onOffer = [
+        {
+          id: '100160',
+          title: 'Hvidløg øko.',
+          price: 550,
+          priceOriginal: null,
+          priceDiscount: null,
+          certificates: [{ type: 'euOrganic', text: 'Øko (europæisk)' }],
+          campaignLines: [{ text: '3 stk. 15,-', accessibilityText: '3 styk 15 kroner' }],
+          campaignBadge: { primaryText: 'Køb flere, spar mere', secondaryText: null, accessibilityText: 'Køb flere, spar mere' },
+          availability: { type: 'Available' },
+          isFavorite: true,
+        },
+        {
+          id: '5046029',
+          title: 'Farfalle',
+          price: 1905,
+          priceOriginal: 3175,
+          priceDiscount: 1270,
+          certificates: [],
+          campaignLines: [],
+          campaignBadge: { primaryText: '40%', secondaryText: 'Spar', accessibilityText: 'Spar 40 procent' },
+          availability: { type: 'Available' },
+          isFavorite: true,
+        },
+        {
+          id: '5069520',
+          title: 'Kyllingebrystfilet',
+          price: 8500,
+          priceOriginal: 11795,
+          priceDiscount: 3295,
+          certificates: [{ type: 'refrigerated', text: 'Køl' }],
+          campaignLines: [],
+          campaignBadge: { primaryText: '32,95', secondaryText: 'Spar', accessibilityText: 'Spar 32,95 kroner' },
+          availability: { type: 'SoldOut' },
+          isFavorite: true,
+        },
+      ];
+      const plain = {
+        id: '2301138',
+        title: 'Banan',
+        price: 250,
+        priceOriginal: null,
+        priceDiscount: null,
+        certificates: [],
+        campaignLines: [],
+        campaignBadge: null,
+        availability: { type: 'Available' },
+        isFavorite: true,
+      };
       return send(200, {
-        NumFound: 5,
-        Products: [
-          {
-            Id: '9098765',
-            Name: 'Letmælk 1L',
-            Price: 12.5,
-            Availability: { IsAvailableInStock: true, IsDeliveryAvailable: false },
-            Labels: [],
-          },
-          {
-            Id: '100160',
-            Name: 'Hvidløg øko.',
-            Price: 5.5,
-            Campaign: { MinQuantity: 3, TotalPrice: 15, CampaignPrice: 15, Type: 'ProductCampaignBuyXForY', IntervalEnd: '2026-09-20T21:59:59Z' },
-            Labels: ['Discount'],
-          },
-          {
-            Id: '5046029',
-            Name: 'Farfalle',
-            Price: 19.05,
-            Campaign: { DiscountPercent: 40, DiscountSavings: 12.7, CampaignPrice: 19.05, Type: 'ProductCampaignDiscountPercent' },
-            Labels: [],
-          },
-          {
-            Id: '5069520',
-            Name: 'Kyllingebrystfilet',
-            Price: 85,
-            Campaign: { DiscountSavings: 32.95, CampaignPrice: 85, Type: 'ProductCampaignDiscount' },
-            Labels: [],
-          },
-          {
-            Id: '5030750',
-            Name: 'Serrano Reserva',
-            Price: 21.25,
-            Campaign: { MinQuantity: 2, TotalPrice: 36, CampaignPrice: 36, Type: 'ProductCampaignMixOffer' },
-            Labels: [],
-          },
+        pageType: 'themePage',
+        pageContent: [
+          { contentType: 'ProductList', header: { title: 'Favoritter på tilbud' }, products: onOffer },
+          // A category section repeating one on-offer favourite plus the plain one.
+          { contentType: 'ProductList', header: { title: 'Frugt og grønt' }, products: [onOffer[0], plain] },
         ],
       });
     }
@@ -145,9 +162,6 @@ export async function startFakeNemlig() {
     expireTokens() {
       state.validTokens.clear();
     },
-    staleFavourites(value = true) {
-      state.favouritesStale = value;
-    },
     accept(token) {
       state.validTokens.add(token);
     },
@@ -175,10 +189,7 @@ export function createFakeLogin(fakeNemlig) {
       acquiredAt: Date.now(),
       // Real tokens last five minutes; `lifetimeMs` lets a test make one stale.
       expiresAt: Date.now() + login.lifetimeMs,
-      userId: '2168977',
       debitorId: '2168977',
-      buildStamp: `stamp-${issued}`,
-      favouritesGroupId: 'discovered-group-id',
     };
   };
   login.lifetimeMs = 5 * 60 * 1000;

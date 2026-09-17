@@ -120,7 +120,7 @@ export function createMcpServer(sessions: SessionManager, credentials: NemligCre
     {
       title: 'Get frequently bought products that are on offer',
       description:
-        "The account's frequently bought products that are currently on promotion — Nemlig's \"Favoritter på tilbud\". The best place to start a shop: things the household actually buys, at a discount. Each product carries an `offer` describing the promotion, e.g. \"3 for 15 kr\" or \"40% off\". Note that multi-buy offers only apply at their `minQuantity`.",
+        "The account's frequently bought products that are currently on promotion — Nemlig's \"Favoritter på tilbud\". The best place to start a shop: things the household actually buys, at a discount. Each product carries an `offer` whose `description` is Nemlig's own shelf-edge wording in Danish (e.g. \"3 stk. 15,-\", \"Spar 40 procent\"), plus structured `minQuantity`, `offerPrice`, `savings` and `percent` where they apply. Multi-buy offers only reach their price at `minQuantity`.",
       inputSchema: { sessionId: sessionIdSchema },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

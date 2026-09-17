@@ -10,44 +10,10 @@ export interface NemligToken {
   /**
    * The customer id the `productbff` API resolves favourites from, read from the
    * token's UMA claims. Present only when the token was minted with `.ASPXAUTH`;
-   * null on a bare service-account token, which the bff treats as anonymous.
+   * null on a bare service-account token, which the bff treats as anonymous — so
+   * its presence doubles as proof the session is really authenticated.
    */
   debitorId: string | null;
-  /**
-   * Nemlig's own customer id, read off a page's `Settings` after login. A token can
-   * be valid while the website session is still anonymous, in which case this is
-   * null — and account-scoped endpoints quietly return nothing instead of failing.
-   * Treating it as required is what makes that state impossible to miss.
-   */
-  userId: string;
-  /**
-   * `Settings.CombinedProductsAndSitecoreTimestamp` — a cache-busting stamp Nemlig
-   * changes whenever it reimports products or republishes content. It sits in the
-   * path of the favourites URL, so it is read fresh at login rather than pinned.
-   */
-  buildStamp: string;
-  /**
-   * Sitecore content id of the favourites list, discovered from the same page that
-   * confirms the session. Pinning it meant a republish silently emptied favourites;
-   * rediscovering it on every login means that heals itself within one token life.
-   */
-  favouritesGroupId: string;
-}
-
-/** A product-list spot on a Sitecore page: which list, and how many are in it. */
-export interface PageSpot {
-  heading: string;
-  productGroupId: string;
-  totalProducts: number;
-}
-
-/** The subset of a Sitecore page's `Settings` block we rely on. */
-export interface PageSettings {
-  UserId: string | null;
-  ZipCode: string;
-  DeliveryZoneId: number;
-  TimeslotUtc: string;
-  CombinedProductsAndSitecoreTimestamp: string;
 }
 
 export interface Availability {

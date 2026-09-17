@@ -114,7 +114,10 @@ export interface Basket {
 }
 
 export interface BasketLine {
+  /** A basket line identifies its product by `Id`; `ProductId` appears in some responses. */
+  Id?: string;
   ProductId?: string;
+  Name?: string;
   ProductName?: string;
   Quantity?: number;
   TotalPrice?: number;

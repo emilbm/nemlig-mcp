@@ -17,7 +17,8 @@ export async function startFakeNemlig() {
     const url = new URL(req.url, 'http://localhost');
     const auth = req.headers['authorization'] ?? '';
     const token = auth.replace(/^Bearer /, '');
-    state.requests.push({ method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), token, headers: req.headers });
+    const record = { method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), token, headers: req.headers };
+    state.requests.push(record);
 
     const send = (status, body) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -107,7 +108,26 @@ export async function startFakeNemlig() {
       req.on('data', (chunk) => (body += chunk));
       req.on('end', () => {
         const parsed = JSON.parse(body);
-        state.basketLines.push({ ProductId: parsed.ProductId, Quantity: parsed.Quantity, TotalPrice: 24.95 * parsed.Quantity });
+        record.body = body;
+        // The real endpoint SETS the line quantity rather than incrementing it,
+        // and anything at or below zero removes the line. Verified against the
+        // live API — modelling it as an increment hid a real bug.
+        const line = state.basketLines.find((candidate) => candidate.Id === parsed.ProductId);
+        const target = parsed.Quantity;
+        if (line && target <= 0) {
+          state.basketLines.splice(state.basketLines.indexOf(line), 1);
+        } else if (line) {
+          line.Quantity = target;
+          line.TotalPrice = 24.95 * target;
+        } else if (target > 0) {
+          state.basketLines.push({
+            Id: parsed.ProductId,
+            ProductId: parsed.ProductId,
+            Name: `Product ${parsed.ProductId}`,
+            Quantity: target,
+            TotalPrice: 24.95 * target,
+          });
+        }
         send(200, { Success: true });
       });
       return;

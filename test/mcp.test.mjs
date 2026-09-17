@@ -66,6 +66,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
       'get_favourite_products',
       'get_favourites_on_offer',
       'new_session',
+      'remove_from_basket',
       'search_products',
     ]);
     await client.close();
@@ -156,11 +157,92 @@ describe('nemlig-mcp over streamable HTTP', () => {
     const added = payload(
       await client.callTool({ name: 'add_to_basket', arguments: { sessionId, productId: '5012345', quantity: 2 } }),
     );
-    assert.deepEqual(added.added, { productId: '5012345', quantity: 2 });
+    assert.deepEqual(added.added, { productId: '5012345', added: 2, quantity: 2 });
 
     const refreshed = payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } }));
     assert.equal(refreshed.basket.Lines.at(-1).ProductId, '5012345');
     assert.equal(refreshed.basket.Lines.at(-1).Quantity, 2, 'a stale cached basket must not be served after a write');
+    await client.close();
+  });
+
+  it('adds cumulatively, even though the endpoint underneath sets an absolute quantity', async () => {
+    // Nemlig's AddToBasket assigns the quantity rather than incrementing it, so
+    // calling add(1) twice used to leave one item. Read-then-set fixes that.
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+
+    const first = payload(
+      await client.callTool({ name: 'add_to_basket', arguments: { sessionId, productId: '700009', quantity: 1 } }),
+    );
+    assert.deepEqual(first.added, { productId: '700009', added: 1, quantity: 1 });
+
+    const second = payload(
+      await client.callTool({ name: 'add_to_basket', arguments: { sessionId, productId: '700009', quantity: 1 } }),
+    );
+    assert.equal(second.added.quantity, 2, 'a second add must build on what was already there');
+
+    const basket = payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } })).basket;
+    assert.equal(basket.Lines.find((l) => l.Id === '700009').Quantity, 2);
+
+    // And the absolute value really did go over the wire, not a delta.
+    const sent = JSON.parse(nemlig.pathsHit('/webapi/basket/AddToBasket').at(-1).body);
+    assert.equal(sent.Quantity, 2);
+    await client.close();
+  });
+
+  it('removes part of a line, and the whole line when no quantity is given', async () => {
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+    const lines = async () =>
+      payload(await client.callTool({ name: 'get_basket', arguments: { sessionId } })).basket.Lines;
+
+    await client.callTool({ name: 'add_to_basket', arguments: { sessionId, productId: '700001', quantity: 3 } });
+
+    const partial = payload(
+      await client.callTool({ name: 'remove_from_basket', arguments: { sessionId, productId: '700001', quantity: 1 } }),
+    );
+    assert.equal(partial.removed.removed, 1);
+    assert.equal(partial.removed.remaining, 2);
+    assert.equal((await lines()).find((l) => l.Id === '700001').Quantity, 2);
+
+    // No quantity means take the whole line out, however many are on it.
+    const all = payload(
+      await client.callTool({ name: 'remove_from_basket', arguments: { sessionId, productId: '700001' } }),
+    );
+    assert.equal(all.removed.removed, 2);
+    assert.equal(all.removed.remaining, 0);
+    assert.equal(
+      (await lines()).find((l) => l.Id === '700001'),
+      undefined,
+      'the line should be gone from the basket',
+    );
+    await client.close();
+  });
+
+  it('clamps an over-large removal instead of driving the quantity negative', async () => {
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+    await client.callTool({ name: 'add_to_basket', arguments: { sessionId, productId: '700002', quantity: 2 } });
+
+    const result = payload(
+      await client.callTool({ name: 'remove_from_basket', arguments: { sessionId, productId: '700002', quantity: 99 } }),
+    );
+    assert.equal(result.removed.removed, 2, 'only what was actually in the basket comes out');
+    assert.equal(result.removed.remaining, 0);
+
+    const sent = nemlig.pathsHit('/webapi/basket/AddToBasket').at(-1);
+    assert.ok(sent, 'a removal should still reach Nemlig');
+    await client.close();
+  });
+
+  it('refuses to remove something that is not in the basket', async () => {
+    const client = await connect();
+    const result = await client.callTool({
+      name: 'remove_from_basket',
+      arguments: { productId: 'not-in-basket' },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /not in the basket/);
     await client.close();
   });
 

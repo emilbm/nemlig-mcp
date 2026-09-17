@@ -74,10 +74,22 @@ export async function getFavouritesOnOffer(client: NemligClient, basket: Basket)
 
 export interface AddToBasketResult {
   productId: string;
+  /** How many this call put in. */
+  added: number;
+  /** How many are on the line now — the two differ when the basket already had some. */
   quantity: number;
 }
 
-export async function addToBasket(client: NemligClient, productId: string, quantity: number): Promise<AddToBasketResult> {
+/**
+ * Despite its name, AddToBasket SETS a line's quantity rather than incrementing it:
+ * posting 3 makes the line 3 however many were there before, and anything at or
+ * below zero removes the line. Measured against the live API, because taking the
+ * name at face value means add_to_basket(1) twice silently leaves you with one.
+ *
+ * Everything that writes goes through here, and every caller reads the current
+ * quantity first so it can compute the absolute value it wants.
+ */
+async function setBasketQuantity(client: NemligClient, productId: string, quantity: number): Promise<void> {
   const response = await client.post(`${webBaseUrl}/webapi/basket/AddToBasket`, {
     AffectPartialQuantity: false,
     ProductId: productId,
@@ -88,10 +100,60 @@ export async function addToBasket(client: NemligClient, productId: string, quant
   if (!response.ok) {
     const body = await response.text();
     throw new NemligApiError(
-      `Failed to add product ${productId} to the basket: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
+      `Failed to set product ${productId} to quantity ${quantity}: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
       response.status,
       body,
     );
   }
-  return { productId, quantity };
 }
+
+/** The line for a product, if the basket currently has one. */
+async function basketLineFor(client: NemligClient, productId: string) {
+  const basket = await getBasket(client);
+  return (basket.Lines ?? []).find((line) => (line.Id ?? line.ProductId) === productId);
+}
+
+export async function addToBasket(client: NemligClient, productId: string, quantity: number): Promise<AddToBasketResult> {
+  // Read first: "add 2" has to become "set to whatever is there plus 2".
+  const line = await basketLineFor(client, productId);
+  const before = line?.Quantity ?? 0;
+  const total = before + quantity;
+  await setBasketQuantity(client, productId, total);
+  return { productId, added: quantity, quantity: total };
+}
+
+export interface RemoveFromBasketResult {
+  productId: string;
+  name: string;
+  removed: number;
+  remaining: number;
+}
+
+/**
+ * Takes items back out. Reads the basket first because the endpoint sets an
+ * absolute quantity: removing 1 of 3 means setting the line to 2, and removing
+ * more than is there means setting it to 0 rather than to a negative number.
+ */
+export async function removeFromBasket(
+  client: NemligClient,
+  productId: string,
+  quantity?: number,
+): Promise<RemoveFromBasketResult> {
+  const line = await basketLineFor(client, productId);
+  if (!line) {
+    throw new NemligApiError(`Product ${productId} is not in the basket, so there is nothing to remove.`, 404, '');
+  }
+
+  const before = line.Quantity ?? 0;
+  // Omitting the quantity means "take the whole line out".
+  const remaining = quantity === undefined ? 0 : Math.max(0, before - quantity);
+  await setBasketQuantity(client, productId, remaining);
+
+  return {
+    productId,
+    name: line.Name ?? line.ProductName ?? productId,
+    removed: before - remaining,
+    remaining,
+  };
+}
+

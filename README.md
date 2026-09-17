@@ -49,7 +49,8 @@ MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig w
 | `search_products` | Searches the catalogue (Danish terms) for a product id. |
 | `get_favourite_products` | The account's frequently bought products. |
 | `get_favourites_on_offer` | Those of them currently on promotion, with the offer described. |
-| `add_to_basket` | Adds a product id to the basket. |
+| `add_to_basket` | Adds a product id to the basket, on top of whatever is already there. |
+| `remove_from_basket` | Takes items back out; omit the quantity to clear the line. |
 | `end_session` | Forgets a session and its stored token. |
 
 `sessionId` is optional everywhere except `end_session`: omit it and the server
@@ -64,6 +65,12 @@ nothing about whether this household buys the product. Each result carries an
 `offer` with a shelf-edge description ("3 for 15 kr", "40% off") plus the
 structured `minQuantity` / `offerPrice` / `savings`, because multi-buy offers only
 apply at their quantity — a single item is still full price.
+
+**`AddToBasket` sets, it does not add.** Posting `Quantity: 3` makes the line three
+however many were on it before, and anything at or below zero removes it — the name
+is a lie, measured against the live API. So both basket tools read the current
+quantity first and send the absolute value they want. Without that, `add_to_basket(1)`
+twice leaves you with one item and no error, which is exactly what it used to do.
 
 Nothing here checks out an order. The basket is as far as it goes, on purpose.
 

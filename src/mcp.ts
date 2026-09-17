@@ -2,7 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { NemligCredentials } from './config.js';
-import { addToBasket, getFavouriteProducts, getFavouritesOnOffer, searchProducts } from './nemlig/commands.js';
+import {
+  addToBasket,
+  getFavouriteProducts,
+  getFavouritesOnOffer,
+  removeFromBasket,
+  searchProducts,
+} from './nemlig/commands.js';
 import type { SessionManager } from './sessions.js';
 
 export const SERVER_NAME = 'nemlig';
@@ -143,6 +149,34 @@ export function createMcpServer(sessions: SessionManager, credentials: NemligCre
       // The basket's contents and totals just changed.
       sessions.invalidateBasket(id);
       return json({ sessionId: id, added: result });
+    },
+  );
+
+  server.registerTool(
+    'remove_from_basket',
+    {
+      title: 'Remove a product from the basket',
+      description:
+        'Takes a product back out of the Nemlig basket. Omit quantity to remove the whole line; give one to take out just that many. Removing more than the basket holds simply empties the line rather than going negative.',
+      inputSchema: {
+        sessionId: sessionIdSchema,
+        productId: z.string().min(1).describe('The product id to remove, as it appears in the basket.'),
+        quantity: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('How many to take out. Omit to remove all of them.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ sessionId, productId, quantity }) => {
+      const id = await sessions.resolve(sessionId, credentials);
+      const result = await sessions.withClient(id, credentials, (client) =>
+        removeFromBasket(client, productId, quantity),
+      );
+      sessions.invalidateBasket(id);
+      return json({ sessionId: id, removed: result });
     },
   );
 

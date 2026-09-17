@@ -35,6 +35,13 @@ export class SessionManager {
   private readonly ttlMs: number;
   private readonly loginQueue: LoginQueue;
 
+  /**
+   * The token and cookies for each live session, in memory only. This is the
+   * sensitive half — `.ASPXAUTH` is a year-long account credential — so it is kept
+   * off the data volume and rebuilt by logging in again after a restart. The disk
+   * store holds only the non-secret metadata that keeps the sessionId valid.
+   */
+  private readonly secrets = new Map<string, NemligToken>();
   /** Per-session in-flight logins, so parallel tool calls share one browser launch. */
   private readonly pendingLogins = new Map<string, Promise<NemligClient>>();
   /** Basket per session — volatile, so it stays in memory and never reaches the file. */
@@ -119,6 +126,7 @@ export class SessionManager {
   }
 
   async end(sessionId: string): Promise<void> {
+    this.secrets.delete(sessionId);
     this.baskets.delete(sessionId);
     this.pendingLogins.delete(sessionId);
     await this.store.delete(sessionId);
@@ -126,6 +134,10 @@ export class SessionManager {
 
   async prune(): Promise<number> {
     const removed = await this.store.prune(this.ttlMs);
+    // Drop the in-memory secret and basket for anything the store no longer keeps.
+    for (const id of [...this.secrets.keys()]) {
+      if (!this.store.get(id)) this.secrets.delete(id);
+    }
     for (const id of [...this.baskets.keys()]) {
       if (!this.store.get(id)) this.baskets.delete(id);
     }
@@ -133,8 +145,10 @@ export class SessionManager {
   }
 
   private async clientFor(sessionId: string, credentials: NemligCredentials): Promise<NemligClient> {
-    const stored = this.store.get(sessionId);
-    if (stored) return new NemligClient(stored.token);
+    // After a restart the metadata survives but the secret does not, so a known
+    // session with no in-memory token authenticates again rather than erroring.
+    const token = this.secrets.get(sessionId);
+    if (token) return new NemligClient(token);
     return this.authenticate(sessionId, credentials);
   }
 
@@ -145,10 +159,12 @@ export class SessionManager {
    * or missing cookie jar costs a browser launch.
    */
   private async mintToken(sessionId: string, credentials: NemligCredentials): Promise<NemligToken> {
-    const stored = this.store.get(sessionId);
-    if (stored?.token.cookieHeader) {
+    // Refresh from the in-memory cookies when we still have them; after a restart
+    // we do not, so this falls straight through to a browser login.
+    const existing = this.secrets.get(sessionId);
+    if (existing?.cookieHeader) {
       try {
-        return await this.refresh(stored.token);
+        return await this.refresh(existing);
       } catch (error) {
         // Falling back is the point: cookies do expire, and the browser still works.
         console.warn(`[session ${sessionId}] refresh failed, logging in again: ${(error as Error).message}`);
@@ -163,11 +179,12 @@ export class SessionManager {
 
     const attempt = this.mintToken(sessionId, credentials)
       .then(async (token) => {
+        // The secret stays in memory; only the non-secret metadata is written.
+        this.secrets.set(sessionId, token);
         const existing = this.store.get(sessionId);
         await this.store.put({
           id: sessionId,
           accountHash: hashAccount(credentials.username),
-          token,
           createdAt: existing?.createdAt ?? Date.now(),
           lastUsedAt: Date.now(),
         });

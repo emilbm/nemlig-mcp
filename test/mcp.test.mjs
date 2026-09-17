@@ -425,7 +425,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
     await client.close();
   });
 
-  it('survives a restart without logging in again', async () => {
+  it('keeps a session working across a restart, re-authenticating from credentials', async () => {
     const client = await connect();
     const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
     await client.close();
@@ -434,8 +434,14 @@ describe('nemlig-mcp over streamable HTTP', () => {
     const { SessionManager } = await import('../dist/src/sessions.js');
     const { createHttpServer } = await import('../dist/src/server.js');
 
-    // A fresh process would read the same file back off the data volume.
-    const restarted = new SessionManager({ store: await SessionStore.open(dataDir), login, ttlMs: 60_000 });
+    // A fresh process reads the metadata file back, but the secret was in memory
+    // only — so the sessionId still resolves and transparently authenticates again.
+    const restarted = new SessionManager({
+      store: await SessionStore.open(dataDir),
+      login,
+      refresh,
+      ttlMs: 60_000,
+    });
     const restartedApp = createHttpServer(restarted);
     await restartedApp.listen({ host: '127.0.0.1', port: 0 });
     const before = login.count;
@@ -446,9 +452,27 @@ describe('nemlig-mcp over streamable HTTP', () => {
     );
     const result = payload(await reconnected.callTool({ name: 'get_basket', arguments: { sessionId } }));
 
-    assert.equal(result.sessionId, sessionId);
-    assert.equal(login.count, before, 'the stored token should survive a restart');
+    assert.equal(result.sessionId, sessionId, 'the same sessionId keeps working');
+    assert.equal(login.count, before + 1, 'with no cookies on disk, the restart re-logs in once');
     await reconnected.close();
     await restartedApp.close();
+  });
+
+  it('never writes the token or cookies to the session file', async () => {
+    const client = await connect();
+    const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));
+
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const raw = await readFile(join(dataDir, 'sessions.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+
+    assert.equal(parsed.version, 2);
+    const stored = parsed.sessions.find((s) => s.id === sessionId);
+    assert.ok(stored, 'the session metadata is persisted');
+    assert.deepEqual(Object.keys(stored).sort(), ['accountHash', 'createdAt', 'id', 'lastUsedAt']);
+    // Nothing anywhere in the file should resemble a token or a cookie.
+    assert.doesNotMatch(raw, /token|cookie|ASPXAUTH/i, 'no credential material may reach disk');
+    await client.close();
   });
 });

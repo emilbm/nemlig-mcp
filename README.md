@@ -15,8 +15,9 @@ Chromium once, catches the JWT that the form's token request returns, keeps the
 cookies it set alongside it, and calls it a **session**.
 
 Everything after that is ordinary `fetch` against Nemlig's web API, reusing that
-token. Sessions are written to `/data/sessions.json` (mode `0600`), so a container
-restart does not cost a fresh login either.
+token. The token and its cookies live in memory, keyed by session id; only
+non-secret metadata is written to `/data/sessions.json`, so the session id keeps
+working across a restart even though the credential itself does not persist.
 
 Two things about that login are worth knowing, because both cost real debugging:
 
@@ -170,14 +171,22 @@ options are `NEMLIG_HEADLESS=false` with an X server in the container, or runnin
 the login on a machine that has a display. It has not been a problem so far, but
 it is the assumption most likely to break.
 
-### The session file is a credential
+### The credential stays in memory
 
-`/data/sessions.json` stores each session's `.ASPXAUTH` cookie, which is a
-year-long authenticator for the account — functionally as sensitive as the
-password. It is written `0600`, but treat the data volume accordingly: anyone who
-can read that file can act as the account until the cookie expires or the password
-changes. This is also why credentials themselves are never written: only the
-resulting cookie is, filed under a hash of the username.
+The `.ASPXAUTH` cookie is a year-long authenticator for the account — as sensitive
+as the password — so it is never written to disk. It is held in memory, keyed by
+session id, alongside the short-lived token. `/data/sessions.json` holds only
+`{id, accountHash, createdAt, lastUsedAt}`: enough to keep a session id valid, and
+useless to anyone who reads the file.
+
+The cost is that a container restart drops the in-memory secret, so the next call
+on each session logs in again (from the env credentials, or from the client's
+headers). That is one browser login per active account per restart — cheap, and a
+fair price for keeping a year-long credential off the volume.
+
+An older `sessions.json` that still holds cookies is detected by its version and
+scrubbed on startup, so upgrading to this version removes any credential the
+previous one had left on disk.
 
 ## Upgrading Playwright
 

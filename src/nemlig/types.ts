@@ -8,6 +8,12 @@ export interface NemligToken {
   /** From the JWT's own `exp`. Nemlig issues five-minute tokens, so this is checked before every call. */
   expiresAt: number;
   /**
+   * The customer id the `productbff` API resolves favourites from, read from the
+   * token's UMA claims. Present only when the token was minted with `.ASPXAUTH`;
+   * null on a bare service-account token, which the bff treats as anonymous.
+   */
+  debitorId: string | null;
+  /**
    * Nemlig's own customer id, read off a page's `Settings` after login. A token can
    * be valid while the website session is still anonymous, in which case this is
    * null — and account-scoped endpoints quietly return nothing instead of failing.

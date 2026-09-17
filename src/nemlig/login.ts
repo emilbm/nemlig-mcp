@@ -38,7 +38,7 @@ export const playwrightLogin: LoginFn = async (credentials) => {
     // as the form is submitted.
     let resolveToken!: (value: string) => void;
     let rejectToken!: (reason: Error) => void;
-    const accessToken = new Promise<string>((resolve, reject) => {
+    const interceptedToken = new Promise<string>((resolve, reject) => {
       resolveToken = resolve;
       rejectToken = reject;
     });
@@ -65,8 +65,12 @@ export const playwrightLogin: LoginFn = async (credentials) => {
     await page.fill("[name='userPassword']", credentials.password);
     await page.click("button[type='submit']");
 
-    const token = await withTimeout(
-      accessToken,
+    // Awaited only to confirm the form succeeded and to surface a bad-credentials
+    // error: this intercepted token is the pre-auth one, minted before .ASPXAUTH
+    // exists and so missing the customer's debitorId. The token we keep is fetched
+    // fresh below, once the authenticated session is established.
+    await withTimeout(
+      interceptedToken,
       config.login.timeoutMs,
       'Timed out waiting for Nemlig to return a token — the credentials may be wrong, or the login page may have changed',
     );
@@ -83,16 +87,19 @@ export const playwrightLogin: LoginFn = async (credentials) => {
      */
     const { settings, spots } = await waitForAuthenticatedSession(page);
 
-    // Only now are the cookies worth keeping.
+    // Only now are the cookies worth keeping — and only now does /webapi/Token
+    // return a token carrying the customer's debitorId, because .ASPXAUTH is set.
     const cookies = await context.cookies();
     const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+    const accessToken = await fetchToken(cookieHeader);
 
     return {
-      accessToken: token,
+      accessToken,
       cookieHeader,
       acquiredAt: Date.now(),
-      expiresAt: expiryOf(token),
+      expiresAt: expiryOf(accessToken),
       userId: settings.UserId!,
+      debitorId: debitorIdOf(accessToken),
       buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
       favouritesGroupId: pickFavouritesGroup(spots),
     };
@@ -177,6 +184,38 @@ export function pickFavouritesGroup(spots: PageSpot[]): string {
   );
 }
 
+/**
+ * GETs a token from `/webapi/Token` with the given cookies.
+ *
+ * The cookies matter for more than identity: when `.ASPXAUTH` is present the
+ * endpoint enriches the token with the customer's `debitorId`, and the new
+ * `productbff` API resolves favourites from exactly that claim. Without cookies —
+ * or when captured mid-login before `.ASPXAUTH` is set — the token is a bare
+ * service-account credential with no customer, which is why an early version of
+ * this login could not read favourites from the bff.
+ */
+export async function fetchToken(cookieHeader: string): Promise<string> {
+  const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/Token`, {
+    headers: { Cookie: cookieHeader, Accept: 'application/json', 'User-Agent': config.nemlig.userAgent },
+  });
+  if (!response.ok) throw new LoginError(`Token request failed: ${response.status} ${response.statusText}`);
+  const body = (await response.json()) as { access_token?: string };
+  if (!body.access_token) throw new LoginError('Token request returned no access_token');
+  return body.access_token;
+}
+
+/** Reads the customer id the bff needs out of the token, or null on a service-account token. */
+export function debitorIdOf(jwt: string): string | null {
+  try {
+    const claims = JSON.parse(Buffer.from(jwt.split('.')[1] ?? '', 'base64url').toString()) as {
+      authorization?: { permissions?: Array<{ claims?: { debitorId?: string[] } }> };
+    };
+    return claims.authorization?.permissions?.[0]?.claims?.debitorId?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reads `exp` out of the JWT. Nemlig's tokens last five minutes, so this is not optional. */
 export function expiryOf(jwt: string): number {
   const segment = jwt.split('.')[1];
@@ -219,19 +258,13 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
  * silent-anonymous state that made the original bug so hard to see.
  */
 export async function refreshSession(token: NemligToken): Promise<NemligToken> {
-  const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/Token`, {
-    headers: { Cookie: token.cookieHeader, Accept: 'application/json', 'User-Agent': config.nemlig.userAgent },
-  });
-  if (!response.ok) throw new LoginError(`Token refresh failed: ${response.status} ${response.statusText}`);
-
-  const body = (await response.json()) as { access_token?: string };
-  if (!body.access_token) throw new LoginError('Token refresh returned no access_token');
+  const accessToken = await fetchToken(token.cookieHeader);
 
   // Prove the cookies still identify the account, and pick up any republished ids
   // from the same request while we are here.
   const probe = await fetch(`${config.nemlig.webBaseUrl}${config.nemlig.sessionProbePath}`, {
     headers: {
-      Authorization: `Bearer ${body.access_token}`,
+      Authorization: `Bearer ${accessToken}`,
       Cookie: token.cookieHeader,
       Accept: 'application/json',
       'User-Agent': config.nemlig.userAgent,
@@ -262,11 +295,12 @@ export async function refreshSession(token: NemligToken): Promise<NemligToken> {
   walk(page.content);
 
   return {
-    accessToken: body.access_token,
+    accessToken,
     cookieHeader: token.cookieHeader,
     acquiredAt: Date.now(),
-    expiresAt: expiryOf(body.access_token),
+    expiresAt: expiryOf(accessToken),
     userId: settings.UserId,
+    debitorId: debitorIdOf(accessToken),
     buildStamp: settings.CombinedProductsAndSitecoreTimestamp,
     favouritesGroupId: spots.length ? pickFavouritesGroup(spots) : token.favouritesGroupId,
   };

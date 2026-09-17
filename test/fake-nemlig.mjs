@@ -176,6 +176,7 @@ export function createFakeLogin(fakeNemlig) {
       // Real tokens last five minutes; `lifetimeMs` lets a test make one stale.
       expiresAt: Date.now() + login.lifetimeMs,
       userId: '2168977',
+      debitorId: '2168977',
       buildStamp: `stamp-${issued}`,
       favouritesGroupId: 'discovered-group-id',
     };
@@ -198,7 +199,7 @@ export function createFakeRefresh(fakeNemlig, login) {
     if (refresh.cookiesExpired) throw new Error('cookies no longer identify the account');
     const next = `refreshed-${calls}`;
     fakeNemlig.accept(next);
-    return { ...token, accessToken: next, acquiredAt: Date.now(), expiresAt: Date.now() + login.lifetimeMs };
+    return { ...token, accessToken: next, acquiredAt: Date.now(), expiresAt: Date.now() + login.lifetimeMs, debitorId: token.debitorId ?? '2168977' };
   };
   refresh.cookiesExpired = false;
   Object.defineProperty(refresh, 'count', { get: () => calls });

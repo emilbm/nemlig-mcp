@@ -1,13 +1,17 @@
 # Runs the image published by CI. Drop this on the Proxmox host next to a .env
 # holding NEMLIG_USERNAME and NEMLIG_PASSWORD, then `docker compose up -d`.
+#
+# No port is published: the server is reached through the Caddy reverse proxy
+# that fronts this host, over the shared `apps-net` network. Create it once with
+# `docker network create apps-net` if it does not exist yet.
 
 services:
   nemlig-mcp:
     image: ghcr.io/emilbm/nemlig-mcp:latest
     container_name: nemlig-mcp
     restart: unless-stopped
-    ports:
-      - "8089:8080"
+    expose:
+      - "8080"
     volumes:
       - nemlig-mcp-data:/data
     environment:
@@ -15,6 +19,11 @@ services:
       NEMLIG_USERNAME: ${NEMLIG_USERNAME:?set NEMLIG_USERNAME in .env}
       NEMLIG_PASSWORD: ${NEMLIG_PASSWORD:?set NEMLIG_PASSWORD in .env}
     shm_size: 512mb
+    networks: [apps-net]
 
 volumes:
   nemlig-mcp-data:
+
+networks:
+  apps-net:
+    external: true

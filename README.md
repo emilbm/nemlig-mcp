@@ -115,22 +115,71 @@ cp .env.example .env   # fill in NEMLIG_USERNAME and NEMLIG_PASSWORD
 docker compose up -d --build
 ```
 
-The endpoint is then `http://<host>:8089/mcp`, with `/health` alongside it. To run
-the image CI publishes instead of building locally, use `deploy/docker-compose.yml`.
+That builds from this working copy and publishes the server directly on
+`http://<host>:8089/mcp`, with `/health` alongside it — the short path for
+developing on the image.
 
-There is **no authentication on the MCP endpoint** — it is LAN-only by design. Put
-a Cloudflare tunnel with Access in front of it if it ever needs to leave the house.
+On the homelab it publishes no port at all. `deploy/docker-compose.yml` runs the
+image CI builds, joins the shared `apps-net` network, and is reached only through
+the Caddy reverse proxy that fronts that host:
+
+```bash
+docker network create apps-net   # once per host
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+The endpoint is then `https://<host>/nemlig/mcp`. Keeping the port unpublished is
+the point: MCP clients require HTTPS even on the LAN, and a published port would
+leave the plaintext endpoint reachable beside the encrypted one.
+
+There is **no authentication on the MCP endpoint** — it is LAN-only by design, and
+the proxy adds TLS, not access control. Put a Cloudflare tunnel with Access in
+front of it if it ever needs to leave the house.
+
+### Behind the proxy
+
+Caddy terminates TLS with its own internal CA and strips the path prefix, so the
+server still sees `/mcp`:
+
+```caddyfile
+<host> {
+	tls internal
+
+	handle_path /nemlig/* {
+		reverse_proxy nemlig-mcp:8080 {
+			# Streamable HTTP holds an SSE channel open; never buffer it.
+			flush_interval -1
+		}
+	}
+}
+```
+
+`flush_interval -1` is not optional. Without it the proxy buffers the SSE channel
+and the client connects and then hangs, with no error on either side.
+
+Because that CA is Caddy's own, clients have to be told to trust its root. Export
+it once from the host's Caddy:
+
+```bash
+docker cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+```
 
 ### Pointing a client at it
 
 ```bash
-claude mcp add --transport http nemlig http://<host>:8089/mcp
+claude mcp add --transport http nemlig https://<host>/nemlig/mcp
 ```
+
+MCP clients here run on Node, which does not read the OS trust store by default, so
+the root has to be named explicitly: `NODE_EXTRA_CA_CERTS=/path/to/caddy-root.crt`
+in the client's environment. In Claude Desktop that goes in the server's own `env`
+block in `claude_desktop_config.json` — which is also what makes a separate CA per
+host workable, since the variable takes a single file path and not a list.
 
 Or, to use a different account than the container's:
 
 ```bash
-claude mcp add --transport http nemlig http://<host>:8089/mcp \
+claude mcp add --transport http nemlig https://<host>/nemlig/mcp \
   --header "X-Nemlig-Username: you@example.com" \
   --header "X-Nemlig-Password: ..."
 ```

@@ -481,6 +481,34 @@ describe('nemlig-mcp over streamable HTTP', () => {
     await restartedApp.close();
   });
 
+  it('keeps working when the data directory cannot be written', async () => {
+    // A volume owned by another uid (the classic image-migration footgun) must not
+    // take the server down: persistence is a convenience, sessions still work.
+    const { SessionStore } = await import('../dist/src/store.js');
+    const { SessionManager } = await import('../dist/src/sessions.js');
+    const { createHttpServer } = await import('../dist/src/server.js');
+
+    const store = await SessionStore.open(dataDir);
+    // Simulate an unwritable /data: point the store's file at a path whose parent is a file.
+    const brokenDir = join(dataDir, 'not-a-dir');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(brokenDir, 'x');
+    const broken = await SessionStore.open(join(brokenDir, 'nested'));
+    const mgr = new SessionManager({ store: broken, login, refresh, ttlMs: 60_000 });
+    const brokenApp = createHttpServer(mgr);
+    await brokenApp.listen({ host: '127.0.0.1', port: 0 });
+
+    const client = new Client({ name: 'test', version: '1.0.0' });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL('/mcp', `http://127.0.0.1:${brokenApp.server.address().port}`)),
+    );
+    const result = payload(await client.callTool({ name: 'get_basket', arguments: {} }));
+    assert.match(result.sessionId, /^[0-9a-f]{12}$/, 'a session is created and usable despite the unwritable store');
+    await client.close();
+    await brokenApp.close();
+    void store;
+  });
+
   it('never writes the token or cookies to the session file', async () => {
     const client = await connect();
     const { sessionId } = payload(await client.callTool({ name: 'new_session', arguments: {} }));

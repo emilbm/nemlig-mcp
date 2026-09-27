@@ -39,8 +39,18 @@ export class SessionStore {
 
   static async open(dataDir: string): Promise<SessionStore> {
     const path = join(dataDir, 'sessions.json');
-    mkdirSync(dirname(path), { recursive: true });
     const store = new SessionStore(path);
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch (error) {
+      // Can't even make the directory — run in memory rather than refusing to start.
+      store.persistenceDisabled = true;
+      console.warn(
+        `[store] cannot use ${dataDir} (${(error as Error).message}); continuing in memory only. ` +
+          'Sessions will work but will not survive a restart.',
+      );
+      return store;
+    }
     await store.load();
     return store;
   }
@@ -119,16 +129,35 @@ export class SessionStore {
     return removed;
   }
 
-  /** Serialised writes: concurrent tool calls must not interleave into a torn file. */
+  /**
+   * Serialised writes: concurrent tool calls must not interleave into a torn file.
+   *
+   * Persistence is a convenience — the session id surviving a restart — not a
+   * requirement, since every session can be rebuilt by logging in again. So a write
+   * failure (an unwritable volume, a full disk) is logged once and then tolerated:
+   * the in-memory map is already updated, so the server keeps working, it just stops
+   * persisting. Better that than every tool call failing because /data is read-only.
+   */
   private flush(): Promise<void> {
     this.writing = this.writing.then(async () => {
-      const payload: FileShape = { version: FILE_VERSION, sessions: [...this.sessions.values()] };
-      const temporary = `${this.path}.${process.pid}.tmp`;
-      await writeFile(temporary, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
-      await rename(temporary, this.path);
+      if (this.persistenceDisabled) return;
+      try {
+        const payload: FileShape = { version: FILE_VERSION, sessions: [...this.sessions.values()] };
+        const temporary = `${this.path}.${process.pid}.tmp`;
+        await writeFile(temporary, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
+        await rename(temporary, this.path);
+      } catch (error) {
+        this.persistenceDisabled = true;
+        console.warn(
+          `[store] cannot write ${this.path} (${(error as Error).message}); continuing in memory only. ` +
+            'Sessions will work but will not survive a restart. Fix the volume permissions to re-enable persistence.',
+        );
+      }
     });
     return this.writing;
   }
+
+  private persistenceDisabled = false;
 }
 
 export function hashAccount(username: string): string {

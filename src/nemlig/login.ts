@@ -1,14 +1,6 @@
-import type { Browser } from 'playwright';
 import { config, type NemligCredentials } from '../config.js';
 import type { NemligToken } from './types.js';
 
-/**
- * Logging in is the one thing we cannot do with plain HTTP: Nemlig's login is a
- * JavaScript form that ends in a token request. So we drive a real browser to
- * submit it, keep the cookies it sets, and from then on everything is fetch.
- *
- * This is deliberately the only Playwright in the codebase.
- */
 export type LoginFn = (credentials: NemligCredentials) => Promise<NemligToken>;
 
 export class LoginError extends Error {
@@ -18,86 +10,19 @@ export class LoginError extends Error {
   }
 }
 
-const TOKEN_URL = `${config.nemlig.webBaseUrl}/webapi/Token`;
-
-export const playwrightLogin: LoginFn = async (credentials) => {
-  // Imported lazily so the module graph — and the tests — do not need a browser.
-  const { chromium } = await import('playwright');
-
-  let browser: Browser | undefined;
-  try {
-    browser = await chromium.launch({
-      headless: config.login.headless,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
-    const context = await browser.newContext({ userAgent: config.nemlig.userAgent, locale: 'da-DK' });
-    const page = await context.newPage();
-
-    // Arm the listener before navigating: a wrong password fails here, and this is
-    // the cheapest place to turn it into a clear error.
-    let rejectToken!: (reason: Error) => void;
-    const loginFormPosted = new Promise<void>((resolve, reject) => {
-      rejectToken = reject;
-      page.on('response', (response) => {
-        if (response.url() !== TOKEN_URL) return;
-        void response
-          .text()
-          .then((body) => {
-            const parsed = JSON.parse(body) as { access_token?: string; error_description?: string };
-            if (parsed.access_token) resolve();
-            else reject(new LoginError(parsed.error_description ?? 'Nemlig rejected the login'));
-          })
-          .catch((cause: unknown) => reject(new LoginError('Could not read the login response', { cause })));
-      });
-    });
-
-    await page.goto(`${config.nemlig.webBaseUrl}/login`, { waitUntil: 'domcontentloaded' });
-
-    // The consent banner covers the form. It may already be dismissed by a stored
-    // preference, so a failure here is not fatal.
-    await page.evaluate('CookieInformation.submitAllCategories()').catch(() => undefined);
-
-    await page.fill("[name='userEmail']", credentials.username);
-    await page.fill("[name='userPassword']", credentials.password);
-    await page.click("button[type='submit']");
-
-    await withTimeout(
-      loginFormPosted,
-      config.login.timeoutMs,
-      'Timed out submitting the Nemlig login — the credentials may be wrong, or the login page may have changed',
-    );
-
-    /*
-     * A token by itself does not mean we are logged in: Nemlig hands out a bare
-     * service-account token to anyone, and only stamps it with the customer's
-     * debitorId once the .ASPXAUTH cookie is established. That cookie lands a beat
-     * after the form posts, so poll — re-reading the jar and re-minting the token —
-     * until the token carries a debitorId. That claim is the real post-condition of
-     * login, and the exact thing the productbff needs.
-     */
-    const authed = await waitForCustomerToken(() => context.cookies());
-    return authed;
-  } catch (error) {
-    if (error instanceof LoginError) throw error;
-    throw new LoginError(`Nemlig login failed: ${(error as Error).message}`, { cause: error });
-  } finally {
-    await browser?.close().catch(() => undefined);
-  }
-};
-
 /**
- * Logs in with a plain HTTP POST — no browser at all.
+ * Logs in with a plain HTTP POST — no browser.
  *
- * The browser was only ever there to make the login form set `.ASPXAUTH`; the form
- * turns out to POST `/webapi/login` with a small JSON body, and that call sets the
- * cookie directly. No XSRF token is required (the endpoint accepts the POST without
- * one), and the API — unlike the HTML `/login` page — has no cookie-priming redirect
- * loop or waiting room to clear. After that, `/webapi/Token` with the cookie mints
- * the debitorId-bearing token exactly as before.
+ * Nemlig's login page is a JavaScript form, but all it does is POST `/webapi/login`
+ * with a small JSON body, and that call sets the `.ASPXAUTH` cookie directly. No
+ * XSRF token is required, and the JSON API — unlike the HTML `/login` page — has no
+ * cookie-priming redirect loop or waiting room to clear from a cold client. After
+ * that, `/webapi/Token` with the cookie mints the debitorId-bearing token: the
+ * customer lives in the cookie, not the token (see refreshSession).
  *
  * The merge flags are all false so logging in never touches the account's basket.
  */
-export const httpLogin: LoginFn = async (credentials) => {
+export const login: LoginFn = async (credentials) => {
   const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/login`, {
     method: 'POST',
     redirect: 'manual',
@@ -133,8 +58,7 @@ export const httpLogin: LoginFn = async (credentials) => {
     throw new LoginError('Login returned 200 but set no .ASPXAUTH cookie — the login flow may have changed.');
   }
 
-  const token = await waitForCustomerToken(async () => parseCookieHeader(cookieHeader));
-  return token;
+  return waitForCustomerToken(cookieHeader);
 };
 
 /** Collects the `name=value` of every Set-Cookie on a response into a Cookie header. */
@@ -148,38 +72,25 @@ function cookiesFromResponse(response: Response): string {
   return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
 }
 
-function parseCookieHeader(cookieHeader: string): Cookie[] {
-  return cookieHeader
-    .split('; ')
-    .filter(Boolean)
-    .map((pair) => {
-      const eq = pair.indexOf('=');
-      return { name: pair.slice(0, eq), value: pair.slice(eq + 1) };
-    });
-}
-
-type Cookie = { name: string; value: string };
-
 /**
- * Polls the token endpoint with the browser's current cookies until the token
- * comes back carrying a debitorId — i.e. until `.ASPXAUTH` has taken effect.
+ * Mints the token from the login cookies, retrying until it carries a debitorId —
+ * i.e. until `.ASPXAUTH` has taken effect. In practice the first attempt already has
+ * it; the loop only covers the rare beat where the cookie is a moment behind.
  */
-async function waitForCustomerToken(readCookies: () => Promise<Cookie[]>): Promise<NemligToken> {
+async function waitForCustomerToken(cookieHeader: string): Promise<NemligToken> {
   const deadline = Date.now() + config.login.sessionTimeoutMs;
   let lastDebitor: string | null = null;
 
-  while (Date.now() < deadline) {
-    const cookieHeader = (await readCookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
-    if (/(^|;\s*)\.ASPXAUTH=/.test(cookieHeader)) {
-      const token = await buildToken(cookieHeader);
-      if (token.debitorId) return token;
-      lastDebitor = token.debitorId;
-    }
+  for (;;) {
+    const token = await buildToken(cookieHeader);
+    if (token.debitorId) return token;
+    lastDebitor = token.debitorId;
+    if (Date.now() >= deadline) break;
     await sleep(500);
   }
 
   throw new LoginError(
-    'Login completed but the session stayed anonymous (no debitorId on the token). ' +
+    'Logged in but the token stayed anonymous (no debitorId). ' +
       'Account-scoped calls would silently return nothing, so this is treated as a failed login. ' +
       `Last debitorId seen: ${JSON.stringify(lastDebitor)}`,
   );
@@ -214,7 +125,7 @@ export async function buildToken(cookieHeader: string): Promise<NemligToken> {
 /**
  * Mints a fresh token without a browser. The token is a five-minute service-account
  * credential; the customer lives in `.ASPXAUTH`, which is good for a year. So an
- * expiry costs one GET, not a Chromium launch — and a token that comes back without
+ * expiry costs one GET, not a full re-login — and a token that comes back without
  * a debitorId means the cookie has finally lapsed and a real login is due.
  */
 export async function refreshSession(token: NemligToken): Promise<NemligToken> {
@@ -252,20 +163,4 @@ export function expiryOf(jwt: string): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new LoginError(message)), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error as Error);
-      },
-    );
-  });
 }

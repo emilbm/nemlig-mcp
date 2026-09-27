@@ -46,19 +46,10 @@ export const config = {
   allowHeaderCredentials: bool('NEMLIG_ALLOW_HEADER_CREDENTIALS', true),
 
   login: {
-    /**
-     * How to log in. 'http' posts /webapi/login directly — no browser, tiny image.
-     * 'browser' drives headless Chromium (the original path), kept as a fallback in
-     * case Nemlig ever fronts the login with a bot check the plain POST cannot pass.
-     */
-    method: str('NEMLIG_LOGIN_METHOD', 'http'),
-    /** Real Chrome, headful, is the most likely to survive Nemlig's bot checks — but a container has no display. */
-    headless: bool('NEMLIG_HEADLESS', true),
-    timeoutMs: int('NEMLIG_LOGIN_TIMEOUT_MS', 60_000),
-    /** How long to wait after the token for the website session to become non-anonymous. */
+    /** How long to keep re-minting the token after login while waiting for the debitorId to appear. */
     sessionTimeoutMs: int('NEMLIG_SESSION_READY_TIMEOUT_MS', 20_000),
-    /** Kept short by default: a browser launch per session is the expensive part we are caching away. */
-    maxConcurrent: int('NEMLIG_LOGIN_MAX_CONCURRENT', 1),
+    /** Cap on concurrent logins; login is cheap now, but this bounds a stampede. */
+    maxConcurrent: int('NEMLIG_LOGIN_MAX_CONCURRENT', 4),
     /**
      * Re-authenticate this long before `exp`. Nemlig's tokens last five minutes and
      * an expired one does not fail — it silently answers as an anonymous visitor —

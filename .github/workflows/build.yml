@@ -29,10 +29,7 @@ jobs:
           node-version: '24'
           cache: npm
 
-      # The tests stub the browser login, so no browser download is needed here.
       - run: npm ci
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       - run: npm run typecheck
 
@@ -75,9 +72,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          # Proxmox hosts are x86. The Playwright base image is amd64/arm64, but
-          # an emulated arm64 build of it is painfully slow — add it only if the
-          # host ever changes.
+          # Proxmox hosts are x86; add linux/arm64 here only if that changes.
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

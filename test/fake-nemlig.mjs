@@ -51,7 +51,7 @@ export async function startFakeNemlig() {
         const parsed = JSON.parse(body);
         record.body = body;
         if (parsed.Username === state.account.username && parsed.Password === state.account.password) {
-          // A real login sets the forms-auth cookie; that is all httpLogin needs.
+          // A real login sets the forms-auth cookie; that is all login needs.
           return send(200, { Data: null, ErrorCode: 0 }, { 'Set-Cookie': '.ASPXAUTH=fake-auth-ticket; Path=/; HttpOnly' });
         }
         return send(400, { Data: null, ErrorCode: 4, ErrorMessage: 'E-mail og/eller password er ikke gyldig' });

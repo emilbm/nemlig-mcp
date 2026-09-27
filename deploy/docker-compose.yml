@@ -18,7 +18,6 @@ services:
       TZ: Europe/Copenhagen
       NEMLIG_USERNAME: ${NEMLIG_USERNAME:?set NEMLIG_USERNAME in .env}
       NEMLIG_PASSWORD: ${NEMLIG_PASSWORD:?set NEMLIG_PASSWORD in .env}
-    shm_size: 512mb
     networks: [apps-net]
 
 volumes:

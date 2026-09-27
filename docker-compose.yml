@@ -17,8 +17,6 @@ services:
       TZ: Europe/Copenhagen
       NEMLIG_USERNAME: ${NEMLIG_USERNAME:?set NEMLIG_USERNAME in .env}
       NEMLIG_PASSWORD: ${NEMLIG_PASSWORD:?set NEMLIG_PASSWORD in .env}
-    # Chromium wants more shared memory than Docker's 64 MB default.
-    shm_size: 512mb
 
 volumes:
   nemlig-mcp-data:

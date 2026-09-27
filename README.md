@@ -9,43 +9,38 @@ This is a port of an Azure Functions prototype. Same idea, none of the Azure.
 
 ## How it works
 
-Nemlig has no public API and no way to get a token with an HTTP call: logging in
-means running their JavaScript login form. So the server drives a headless
-Chromium once, catches the JWT that the form's token request returns, keeps the
-cookies it set alongside it, and calls it a **session**.
+Nemlig has no public API. The website's login looks like a JavaScript form, but
+all it does is `POST /webapi/login` with a small JSON body — which sets an
+`.ASPXAUTH` cookie — so the server logs in with a plain `fetch`, no browser. From
+there it's ordinary `fetch` against Nemlig's web API. A login plus the resulting
+token and cookies is a **session**.
 
-Everything after that is ordinary `fetch` against Nemlig's web API, reusing that
-token. The token and its cookies live in memory, keyed by session id; only
-non-secret metadata is written to `/data/sessions.json`, so the session id keeps
-working across a restart even though the credential itself does not persist.
+The token and its cookies live in memory, keyed by session id; only non-secret
+metadata is written to `/data/sessions.json`, so the session id keeps working
+across a restart even though the credential itself does not persist.
 
-Two things about that login are worth knowing, because both cost real debugging:
+Two things about the token are worth knowing, because both cost real debugging:
 
-**A token is not a session, and the token carries the customer.** The JWT is a
-service-account credential — anyone can fetch one — but when `/webapi/Token` is
-called with the `.ASPXAUTH` cookie it stamps the token with the customer's
-`debitorId`, and the `productbff` API resolves favourites from exactly that claim.
-The cookie lands a beat *after* the login form posts, so login polls the token
-endpoint until the token comes back carrying a `debitorId`. That claim is both the
-proof the session is really authenticated and the thing the bff needs; without it
-every account-scoped call comes back empty, as an anonymous visitor, with no error.
+**The token carries the customer, and the cookie carries the token.** The JWT is a
+service-account credential — `preferred_username` is `service-account-sitecore`,
+and `/webapi/Token` hands one out to anyone. Only when it is fetched with the
+`.ASPXAUTH` cookie does it gain the customer's `debitorId`, and the `productbff`
+API resolves favourites from exactly that claim. So login fetches the token until
+it comes back carrying a `debitorId`: that claim is both the proof the session is
+really authenticated and the thing the bff needs. Without it every account-scoped
+call comes back empty, as an anonymous visitor, with no error.
 
 **Tokens last five minutes, and expiry does not fail loudly.** An expired token
-gets the same silent anonymous treatment: `200`, empty basket, nothing wrong on
+gets that same silent anonymous treatment: `200`, empty basket, nothing wrong on
 the wire. Waiting for a `401` would never fire, so expiry is read from the JWT's
-own `exp` and the token is replaced before the call goes out.
-
-**Refreshing needs no browser.** The JWT is a *service-account* credential —
-`preferred_username` is `service-account-sitecore`, and the `/webapi/Token`
-endpoint hands one out to anyone. The account is identified by a cookie, not the
-token: `.ASPXAUTH`, an ordinary forms-auth ticket good for a year. So an expiring
-token costs one GET carrying the stored cookies, and only a lapsed cookie jar
-falls back to a Chromium launch. Measured: ~280 ms versus ~6–10 s.
+own `exp` and the token is refreshed before the call goes out. Refreshing is just
+another `/webapi/Token` GET with the stored `.ASPXAUTH` (good for a year), so it
+costs one request; only a lapsed cookie forces a full re-login.
 
 ```
 MCP client ──HTTP──► /mcp ──► session manager ──► Nemlig web API (fetch + JWT)
                                      │
-                                     └─ first call only ─► Playwright ─► login form
+                                     └─ first call only ─► POST /webapi/login
 ```
 
 ## Tools
@@ -96,9 +91,7 @@ a session started by one account is never handed to another.
 | --- | --- | --- |
 | `NEMLIG_USERNAME` / `NEMLIG_PASSWORD` | — | The default account. Omit both to make the server header-only. |
 | `NEMLIG_ALLOW_HEADER_CREDENTIALS` | `true` | Set `false` to pin the server to the env account. |
-| `NEMLIG_HEADLESS` | `true` | See *Headless and bot checks* below. |
-| `NEMLIG_LOGIN_TIMEOUT_MS` | `60000` | How long to wait for the token response. |
-| `NEMLIG_SESSION_READY_TIMEOUT_MS` | `20000` | How long to wait for the site to stop treating us as anonymous. |
+| `NEMLIG_SESSION_READY_TIMEOUT_MS` | `20000` | How long to keep re-minting the token after login while the `debitorId` appears. |
 | `NEMLIG_REFRESH_MARGIN_MS` | `45000` | Re-authenticate this long before the five-minute token expires. |
 | `NEMLIG_SESSION_TTL_MS` | `604800000` (7 days) | Untouched sessions are pruned hourly. |
 | `NEMLIG_DATA_DIR` | `/data` | Where `sessions.json` lives. |
@@ -188,23 +181,23 @@ claude mcp add --transport http nemlig https://<host>/nemlig/mcp \
 
 ```bash
 npm install
-npx playwright install chromium   # only needed to exercise a real login
 npm run dev
 npm test
 ```
 
-The tests run every tool end to end over streamable HTTP against a fake Nemlig,
-with the browser login stubbed — including token expiry, the retry, and a
-restart. No network and no browser required.
+The tests run every tool end to end over streamable HTTP against a fake Nemlig —
+including the HTTP login, token expiry, the refresh, and a restart. No network, no
+browser, nothing to install beyond the npm dependencies.
 
 ## Known fragility
 
 This talks to a private API by pretending to be the website, so it breaks when
-the website changes. The two places that will go first:
+the website changes. The places that will go first:
 
-- **The login flow.** `src/nemlig/login.ts` fills `[name='userEmail']` and
-  `[name='userPassword']` and waits for `POST /webapi/Token`. If Nemlig redesigns
-  the login page, that is the file to fix.
+- **The login call.** `src/nemlig/login.ts` posts `/webapi/login` with
+  `{Username, Password, …}` and expects an `.ASPXAUTH` cookie back. If Nemlig
+  changes that endpoint — or fronts it with a bot check — that is the file to fix,
+  and the point where a browser-driven login might have to come back.
 - **The `debitorId` in the token.** Favourites only resolve because `/webapi/Token`,
   called with `.ASPXAUTH`, embeds the customer's `debitorId`, which the bff reads.
   Login treats a token without a `debitorId` as a failed login rather than pressing
@@ -213,15 +206,6 @@ the website changes. The two places that will go first:
 - **The `productbff` favourites shape.** `src/nemlig/bff.ts` reads `pageContent`
   sections of products with `price` (øre), `certificates`, `campaignLines` and
   `campaignBadge`. A redesign of that response is what would break favourites next.
-
-### Headless and bot checks
-
-The original prototype ran real Chrome with a visible window, which is the most
-likely thing to survive a bot check. A container has no display, so this runs
-headless Chromium with a normal user agent. If Nemlig ever refuses that, the
-options are `NEMLIG_HEADLESS=false` with an X server in the container, or running
-the login on a machine that has a display. It has not been a problem so far, but
-it is the assumption most likely to break.
 
 ### The credential stays in memory
 
@@ -233,15 +217,9 @@ useless to anyone who reads the file.
 
 The cost is that a container restart drops the in-memory secret, so the next call
 on each session logs in again (from the env credentials, or from the client's
-headers). That is one browser login per active account per restart — cheap, and a
-fair price for keeping a year-long credential off the volume.
+headers). That is one HTTP login per active account per restart — a fraction of a
+second, and a fair price for keeping a year-long credential off the volume.
 
 An older `sessions.json` that still holds cookies is detected by its version and
 scrubbed on startup, so upgrading to this version removes any credential the
 previous one had left on disk.
-
-## Upgrading Playwright
-
-`package.json` pins Playwright exactly and the Dockerfile pins the matching
-`mcr.microsoft.com/playwright:v<version>-noble` base image. Bump both in the same
-commit, or the container will try to download a browser it has no room for.

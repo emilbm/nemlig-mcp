@@ -60,24 +60,24 @@ describe('nemlig-mcp over streamable HTTP', () => {
   }
 
   it('logs in over plain HTTP, no browser, and gets a debitorId token', async () => {
-    const { httpLogin } = await import('../dist/src/nemlig/login.js');
+    const { login } = await import('../dist/src/nemlig/login.js');
     const before = nemlig.state.tokensIssued;
 
-    const token = await httpLogin({ username: 'shopper@example.com', password: 'hunter2' });
+    const token = await login({ username: 'shopper@example.com', password: 'hunter2' });
 
     assert.match(token.cookieHeader, /\.ASPXAUTH=/, 'the login cookie is kept');
     assert.equal(token.debitorId, '2168977', 'the token carries the customer id the bff needs');
     assert.ok(token.expiresAt > Date.now(), 'and a real expiry');
 
-    const login = nemlig.state.requests.find((r) => r.path === '/webapi/login');
-    assert.equal(JSON.parse(login.body).DoMerge, false, 'login must not merge/modify the basket');
+    const loginReq = nemlig.state.requests.find((r) => r.path === '/webapi/login');
+    assert.equal(JSON.parse(loginReq.body).DoMerge, false, 'login must not merge/modify the basket');
     assert.ok(nemlig.state.tokensIssued > before, 'the token was minted over HTTP');
   });
 
   it('surfaces the Nemlig error message when HTTP login credentials are wrong', async () => {
-    const { httpLogin } = await import('../dist/src/nemlig/login.js');
+    const { login } = await import('../dist/src/nemlig/login.js');
     await assert.rejects(
-      httpLogin({ username: 'shopper@example.com', password: 'wrong' }),
+      login({ username: 'shopper@example.com', password: 'wrong' }),
       (error) => {
         assert.match(error.message, /ikke gyldig/, 'the Danish invalid-credentials message is surfaced');
         return true;
@@ -371,7 +371,7 @@ describe('nemlig-mcp over streamable HTTP', () => {
 
   it('refreshes an expired token from cookies, without launching a browser', async () => {
     // The JWT is a service-account credential; the cookies identify the customer
-    // and last a year. So expiry should cost one GET, not a Chromium launch.
+    // and last a year. So expiry should cost one GET, not a full re-login.
     const client = await connect();
     login.lifetimeMs = 10_000;
     try {

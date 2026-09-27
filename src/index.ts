@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { playwrightLogin } from './nemlig/login.js';
+import { httpLogin, playwrightLogin } from './nemlig/login.js';
 import { createHttpServer } from './server.js';
 import { SessionManager } from './sessions.js';
 import { SessionStore } from './store.js';
@@ -9,7 +9,7 @@ const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const store = await SessionStore.open(config.dataDir);
 const sessions = new SessionManager({
   store,
-  login: playwrightLogin,
+  login: config.login.method === 'browser' ? playwrightLogin : httpLogin,
   ttlMs: config.sessionTtlMs,
   maxConcurrentLogins: config.login.maxConcurrent,
 });

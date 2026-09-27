@@ -1,5 +1,21 @@
 import { createServer } from 'node:http';
 
+/** An unsigned JWT whose payload we can base64url-decode — enough for the code under test. */
+function fakeJwt(authed) {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    exp: now + 300,
+    iat: now,
+    sub: '139fc86c',
+    preferred_username: 'service-account-sitecore',
+    authorization: {
+      permissions: [{ rsid: 'r', rsname: 'Default Resource', ...(authed ? { claims: { debitorId: ['2168977'] } } : {}) }],
+    },
+  };
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${b64({ alg: 'none', typ: 'JWT' })}.${b64(payload)}.sig`;
+}
+
 /**
  * Stands in for Nemlig's web API. Records what it was asked and can be told to
  * start rejecting a token, which is how the expiry-and-retry path gets tested.
@@ -10,6 +26,8 @@ export async function startFakeNemlig() {
     validTokens: new Set(['token-1']),
     requests: [],
     basketLines: [],
+    account: { username: 'shopper@example.com', password: 'hunter2' },
+    tokensIssued: 0,
   };
 
   const server = createServer((req, res) => {
@@ -19,10 +37,37 @@ export async function startFakeNemlig() {
     const record = { method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), token, headers: req.headers };
     state.requests.push(record);
 
-    const send = (status, body) => {
-      res.writeHead(status, { 'Content-Type': 'application/json' });
+    const send = (status, body, headers = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
       res.end(JSON.stringify(body));
     };
+
+    // --- Unauthenticated endpoints (no bearer): the browserless login and the token mint. ---
+
+    if (url.pathname === '/webapi/login' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body);
+        record.body = body;
+        if (parsed.Username === state.account.username && parsed.Password === state.account.password) {
+          // A real login sets the forms-auth cookie; that is all httpLogin needs.
+          return send(200, { Data: null, ErrorCode: 0 }, { 'Set-Cookie': '.ASPXAUTH=fake-auth-ticket; Path=/; HttpOnly' });
+        }
+        return send(400, { Data: null, ErrorCode: 4, ErrorMessage: 'E-mail og/eller password er ikke gyldig' });
+      });
+      return;
+    }
+
+    if (url.pathname === '/webapi/Token' && req.method === 'GET') {
+      // The token is a service-account JWT; a debitorId claim appears only when the
+      // request carries the .ASPXAUTH cookie, exactly like the real endpoint.
+      const authed = /(^|;\s*)\.ASPXAUTH=/.test(req.headers['cookie'] ?? '');
+      state.tokensIssued++;
+      const jwt = fakeJwt(authed);
+      state.validTokens.add(jwt);
+      return send(200, { access_token: jwt });
+    }
 
     if (!state.validTokens.has(token)) return send(401, { message: 'token expired' });
 

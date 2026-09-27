@@ -46,6 +46,12 @@ export const config = {
   allowHeaderCredentials: bool('NEMLIG_ALLOW_HEADER_CREDENTIALS', true),
 
   login: {
+    /**
+     * How to log in. 'http' posts /webapi/login directly — no browser, tiny image.
+     * 'browser' drives headless Chromium (the original path), kept as a fallback in
+     * case Nemlig ever fronts the login with a bot check the plain POST cannot pass.
+     */
+    method: str('NEMLIG_LOGIN_METHOD', 'http'),
     /** Real Chrome, headful, is the most likely to survive Nemlig's bot checks — but a container has no display. */
     headless: bool('NEMLIG_HEADLESS', true),
     timeoutMs: int('NEMLIG_LOGIN_TIMEOUT_MS', 60_000),

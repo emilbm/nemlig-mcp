@@ -85,6 +85,79 @@ export const playwrightLogin: LoginFn = async (credentials) => {
   }
 };
 
+/**
+ * Logs in with a plain HTTP POST — no browser at all.
+ *
+ * The browser was only ever there to make the login form set `.ASPXAUTH`; the form
+ * turns out to POST `/webapi/login` with a small JSON body, and that call sets the
+ * cookie directly. No XSRF token is required (the endpoint accepts the POST without
+ * one), and the API — unlike the HTML `/login` page — has no cookie-priming redirect
+ * loop or waiting room to clear. After that, `/webapi/Token` with the cookie mints
+ * the debitorId-bearing token exactly as before.
+ *
+ * The merge flags are all false so logging in never touches the account's basket.
+ */
+export const httpLogin: LoginFn = async (credentials) => {
+  const response = await fetch(`${config.nemlig.webBaseUrl}/webapi/login`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': config.nemlig.userAgent,
+    },
+    body: JSON.stringify({
+      Username: credentials.username,
+      Password: credentials.password,
+      CheckForExistingProducts: false,
+      DoMerge: false,
+      AppInstalled: false,
+      SaveExistingBasket: false,
+    }),
+  });
+
+  if (response.status !== 200) {
+    // Nemlig returns a clean Danish message for bad credentials; surface it.
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = (await response.json()) as { ErrorMessage?: string };
+      if (body.ErrorMessage) detail = body.ErrorMessage;
+    } catch {
+      /* keep the status line */
+    }
+    throw new LoginError(`Nemlig rejected the login: ${detail}`);
+  }
+
+  const cookieHeader = cookiesFromResponse(response);
+  if (!/(^|;\s*)\.ASPXAUTH=/.test(cookieHeader)) {
+    throw new LoginError('Login returned 200 but set no .ASPXAUTH cookie — the login flow may have changed.');
+  }
+
+  const token = await waitForCustomerToken(async () => parseCookieHeader(cookieHeader));
+  return token;
+};
+
+/** Collects the `name=value` of every Set-Cookie on a response into a Cookie header. */
+function cookiesFromResponse(response: Response): string {
+  const jar = new Map<string, string>();
+  for (const raw of response.headers.getSetCookie()) {
+    const pair = raw.split(';', 1)[0] ?? '';
+    const eq = pair.indexOf('=');
+    if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
+  return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function parseCookieHeader(cookieHeader: string): Cookie[] {
+  return cookieHeader
+    .split('; ')
+    .filter(Boolean)
+    .map((pair) => {
+      const eq = pair.indexOf('=');
+      return { name: pair.slice(0, eq), value: pair.slice(eq + 1) };
+    });
+}
+
 type Cookie = { name: string; value: string };
 
 /**

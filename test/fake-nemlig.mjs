@@ -93,6 +93,8 @@ export async function startFakeNemlig() {
               Price: 24.95,
               Availability: { IsAvailableInStock: true, IsDeliveryAvailable: true },
               Labels: ['Økologi'],
+              Description: ' 500 g / Danske Bær ',
+              Brand: 'Danske Bær',
             },
           ],
         },

@@ -103,6 +103,14 @@ export interface ProductSummary {
   inStock: boolean;
   deliverable: boolean;
   labels: string[];
+  /**
+   * Nemlig's line under the name — the pack size, often with the brand
+   * ("1 kg / Valsemøllen"). Names alone do not tell four "Hvedemel" apart, and
+   * without the size nothing can work out how many to buy. Absent when Nemlig
+   * sends none.
+   */
+  description?: string;
+  brand?: string;
   /** Present only when the product is actually on offer, so its absence means full price. */
   offer?: Offer;
 }
@@ -116,6 +124,8 @@ export function summarizeProduct(product: Product): ProductSummary {
     inStock: product.Availability?.IsAvailableInStock ?? true,
     deliverable: product.Availability?.IsDeliveryAvailable ?? true,
     labels: product.Labels ?? [],
+    ...(product.Description?.trim() ? { description: product.Description.trim() } : {}),
+    ...(product.Brand?.trim() ? { brand: product.Brand.trim() } : {}),
     ...(offer ? { offer } : {}),
   };
 }

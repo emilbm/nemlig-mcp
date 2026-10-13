@@ -132,6 +132,9 @@ describe('nemlig-mcp over streamable HTTP', () => {
       inStock: true,
       deliverable: true,
       labels: ['Økologi'],
+      // The pack size is what lets a caller work out how many to buy.
+      description: '500 g / Danske Bær',
+      brand: 'Danske Bær',
     });
 
     const search = nemlig.pathsHit('/searchgateway/api/search').at(-1);
